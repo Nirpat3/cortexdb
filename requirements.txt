@@ -1,0 +1,23 @@
+# CortexDB Dependencies
+# (c) 2026 Nirlab Inc.
+
+# Core API
+fastapi==0.115.*
+uvicorn[standard]==0.34.*
+pydantic==2.*
+
+# RelationalCore (Neocortex) + TemporalCore (Cerebellum) + GraphCore
+asyncpg==0.30.*
+
+# MemoryCore (Working Memory) + StreamCore (Thalamic Relay)
+redis[hiredis]==5.*
+
+# VectorCore (Hippocampus)
+qdrant-client==1.12.*
+
+# ImmutableCore (Declarative Memory) - built-in (file-based + PostgreSQL)
+# No extra dependency
+
+# Utilities
+python-dotenv==1.*
+httpx==0.28.*
