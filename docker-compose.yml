@@ -1,0 +1,442 @@
+# ============================================================
+# CortexDB - Consciousness-Inspired Unified Database
+# Docker Compose Stack
+# (c) 2026 Nirlab Inc. All Rights Reserved.
+# ============================================================
+#
+# REPLACES: PostgreSQL + Redis + Pinecone + Neo4j + TimescaleDB + Kafka + Hyperledger
+# WITH:     One system, one query language (CortexQL), one dashboard
+#
+# Usage:
+#   docker compose up -d                     # Start all services
+#   docker compose up -d cortex-router       # Start router + dependencies
+#   docker compose --profile observability up -d  # Include monitoring stack
+#
+# HARDWARE REQUIREMENTS:
+#   Minimum:     2 CPU, 4 GB RAM, 50 GB SSD
+#   Recommended: 4 CPU, 16 GB RAM, 200 GB NVMe
+#   Enterprise:  8+ CPU, 32+ GB RAM, 500 GB+ NVMe
+# ============================================================
+
+x-common: &common
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+
+  # -------------------------------------------------------
+  # CortexDB Router (Thalamus + Amygdala + Prefrontal Cortex)
+  # -------------------------------------------------------
+  cortex-router:
+    <<: *common
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cortex-router
+    ports:
+      - "5400:5400"
+      - "5401:5401"
+      - "5402:5402"
+    environment:
+      - CORTEX_MODE=production
+      - CORTEX_PORT=5400
+      - CORTEX_HEALTH_PORT=5401
+      - CORTEX_ADMIN_PORT=5402
+      - RELATIONAL_CORE_URL=postgresql://cortex:${POSTGRES_PASSWORD:-cortex_secret}@relational-core:5432/cortexdb
+      - MEMORY_CORE_URL=redis://memory-core:6379/0
+      - MEMORY_CORE_PASSWORD=${REDIS_PASSWORD:-cortex_redis_secret}
+      - VECTOR_CORE_URL=http://vector-core:6333
+      - TEMPORAL_CORE_URL=postgresql://cortex:${POSTGRES_PASSWORD:-cortex_secret}@relational-core:5432/cortexdb
+      - GRAPH_CORE_URL=postgresql://cortex:${POSTGRES_PASSWORD:-cortex_secret}@relational-core:5432/cortexdb
+      - STREAM_CORE_URL=redis://stream-core:6380/0
+      - STREAM_CORE_PASSWORD=${STREAM_PASSWORD:-cortex_stream_secret}
+      - IMMUTABLE_CORE_PATH=/data/immutable
+      - CORTEX_SECRET_KEY=${CORTEX_SECRET_KEY:?Set CORTEX_SECRET_KEY in .env (min 64 chars)}
+      - CORTEX_ADMIN_TOKEN=${CORTEX_ADMIN_TOKEN:-}
+      - CORTEX_CORS_ORIGINS=${CORTEX_CORS_ORIGINS:-http://localhost:3000,http://localhost:5400}
+      - CORTEX_ENABLE_AMYGDALA=true
+      - CORTEX_ENABLE_PLASTICITY=true
+      - CORTEX_ENABLE_SLEEP_CYCLE=true
+      - CORTEX_SLEEP_CYCLE_HOUR=2
+    volumes:
+      - cortex-immutable:/data/immutable
+      - cortex-cache:/data/cache
+    depends_on:
+      relational-core:
+        condition: service_healthy
+      memory-core:
+        condition: service_healthy
+      stream-core:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5401/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    networks:
+      - cortex-net
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  # -------------------------------------------------------
+  # Neocortex — Citus 12 (PostgreSQL 16)
+  # Replaces: PostgreSQL + Neo4j + TimescaleDB
+  # -------------------------------------------------------
+  relational-core:
+    <<: *common
+    image: citusdata/citus:12.1
+    container_name: cortex-relational
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=cortex
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-cortex_secret}
+      - POSTGRES_DB=cortexdb
+      - POSTGRES_SHARED_BUFFERS=512MB
+      - POSTGRES_EFFECTIVE_CACHE_SIZE=1536MB
+      - POSTGRES_WORK_MEM=32MB
+      - POSTGRES_MAINTENANCE_WORK_MEM=256MB
+      - POSTGRES_WAL_BUFFERS=32MB
+      - POSTGRES_MAX_CONNECTIONS=300
+      - POSTGRES_MAX_WAL_SENDERS=10
+      - POSTGRES_WAL_LEVEL=logical
+    volumes:
+      - cortex-pg-data:/var/lib/postgresql/data
+      - ./db/migrations/001_schema.sql:/docker-entrypoint-initdb.d/01-init.sql
+      - ./db/migrations/002_sharding.sql:/docker-entrypoint-initdb.d/02-sharding.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cortex -d cortexdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    networks:
+      - cortex-net
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 4G
+        reservations:
+          cpus: "1.0"
+          memory: 1G
+
+  # -------------------------------------------------------
+  # Citus Workers — Horizontal Shard Nodes
+  # -------------------------------------------------------
+  citus-worker-1:
+    <<: *common
+    image: citusdata/citus:12.1
+    container_name: cortex-citus-worker-1
+    environment:
+      - POSTGRES_USER=cortex
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-cortex_secret}
+      - POSTGRES_DB=cortexdb
+      - POSTGRES_SHARED_BUFFERS=256MB
+      - POSTGRES_EFFECTIVE_CACHE_SIZE=768MB
+      - POSTGRES_WORK_MEM=16MB
+      - POSTGRES_MAX_CONNECTIONS=200
+    volumes:
+      - cortex-citus-w1-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cortex -d cortexdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      relational-core:
+        condition: service_healthy
+    networks:
+      - cortex-net
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  citus-worker-2:
+    <<: *common
+    image: citusdata/citus:12.1
+    container_name: cortex-citus-worker-2
+    environment:
+      - POSTGRES_USER=cortex
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-cortex_secret}
+      - POSTGRES_DB=cortexdb
+      - POSTGRES_SHARED_BUFFERS=256MB
+      - POSTGRES_EFFECTIVE_CACHE_SIZE=768MB
+      - POSTGRES_WORK_MEM=16MB
+      - POSTGRES_MAX_CONNECTIONS=200
+    volumes:
+      - cortex-citus-w2-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cortex -d cortexdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      relational-core:
+        condition: service_healthy
+    networks:
+      - cortex-net
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  # -------------------------------------------------------
+  # Working Memory — Redis 7 (Cache + Sessions + Pub/Sub)
+  # -------------------------------------------------------
+  memory-core:
+    <<: *common
+    image: redis:7-alpine
+    container_name: cortex-memory
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --appendonly yes
+      --appendfsync everysec
+      --save 60 1000
+      --save 300 100
+      --requirepass ${REDIS_PASSWORD:-cortex_redis_secret}
+    volumes:
+      - cortex-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "cortex_redis_secret", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+    networks:
+      - cortex-net
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+  # -------------------------------------------------------
+  # Thalamic Relay — Redis Streams (Event Streaming)
+  # Replaces: Kafka (for MVP/Growth tier)
+  # -------------------------------------------------------
+  stream-core:
+    <<: *common
+    image: redis:7-alpine
+    container_name: cortex-stream
+    ports:
+      - "6380:6380"
+    command: >
+      redis-server
+      --port 6380
+      --maxmemory 256mb
+      --maxmemory-policy noeviction
+      --appendonly yes
+      --appendfsync everysec
+      --requirepass ${STREAM_PASSWORD:-cortex_stream_secret}
+    volumes:
+      - cortex-stream-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "6380", "-a", "cortex_stream_secret", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+    networks:
+      - cortex-net
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 384M
+
+  # -------------------------------------------------------
+  # Hippocampus — Qdrant (Vector Search)
+  # Replaces: Pinecone
+  # -------------------------------------------------------
+  vector-core:
+    <<: *common
+    image: qdrant/qdrant:latest
+    container_name: cortex-vector
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - cortex-vector-data:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
+      - QDRANT__SERVICE__HTTP_PORT=6333
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:6333/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    networks:
+      - cortex-net
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+  # -------------------------------------------------------
+  # Observability Stack (profile: observability)
+  # -------------------------------------------------------
+  otel-collector:
+    <<: *common
+    profiles: ["observability"]
+    image: otel/opentelemetry-collector:latest
+    container_name: cortex-otel
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    volumes:
+      - ./config/otel-config.yml:/etc/otelcol/config.yaml
+    networks:
+      - cortex-net
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+  prometheus:
+    <<: *common
+    profiles: ["observability"]
+    image: prom/prometheus:latest
+    container_name: cortex-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml
+      - cortex-prometheus-data:/prometheus
+    networks:
+      - cortex-net
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+  loki:
+    <<: *common
+    profiles: ["observability"]
+    image: grafana/loki:latest
+    container_name: cortex-loki
+    ports:
+      - "3100:3100"
+    networks:
+      - cortex-net
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+  tempo:
+    <<: *common
+    profiles: ["observability"]
+    image: grafana/tempo:latest
+    container_name: cortex-tempo
+    ports:
+      - "3200:3200"
+    command: ["-config.file=/etc/tempo.yml"]
+    networks:
+      - cortex-net
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+  grafana:
+    <<: *common
+    profiles: ["observability"]
+    image: grafana/grafana:latest
+    container_name: cortex-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-cortex_admin}
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+    volumes:
+      - cortex-grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    networks:
+      - cortex-net
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+
+  # -------------------------------------------------------
+  # Dashboard — CortexDB Admin UI
+  # -------------------------------------------------------
+  cortex-dashboard:
+    <<: *common
+    profiles: ["dashboard"]
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: cortex-dashboard
+    ports:
+      - "3400:3000"
+    environment:
+      - CORTEX_API_URL=http://cortex-router:5400
+      - CORTEX_ADMIN_URL=http://cortex-router:5402
+    depends_on:
+      - cortex-router
+    networks:
+      - cortex-net
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+volumes:
+  cortex-pg-data:
+  cortex-redis-data:
+  cortex-stream-data:
+  cortex-vector-data:
+  cortex-immutable:
+  cortex-cache:
+  cortex-citus-w1-data:
+  cortex-citus-w2-data:
+  cortex-prometheus-data:
+  cortex-grafana-data:
+
+networks:
+  cortex-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
