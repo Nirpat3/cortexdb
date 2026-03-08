@@ -6,6 +6,6 @@ REPLACES: PostgreSQL + Redis + Pinecone + Neo4j + TimescaleDB + Kafka + Hyperled
 WITH:     One system, one query language (CortexQL), one API
 """
 
-__version__ = "4.0.0"
+__version__ = "5.0.0"
 __author__ = "Nirlab Inc"
 __trademark__ = "CortexDB and CortexQL are trademarks of Nirlab Inc"

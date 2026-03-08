@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cortexdb"
-version = "4.0.0"
+version = "5.0.0"
 description = "Consciousness-Inspired Unified Database — replaces 7 databases with one"
 readme = "README.md"
 license = "Proprietary"
@@ -44,6 +44,7 @@ observability = [
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
+    "pytest-cov>=5",
     "httpx>=0.28",
     "ruff>=0.4",
     "mypy>=1.10",
@@ -62,6 +63,8 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "security: marks security/pentest tests",
     "stress: marks stress tests",
+    "integration: marks integration tests (API-level with mocked backends)",
+    "e2e: marks end-to-end tests (require running services)",
 ]
 
 [tool.ruff]

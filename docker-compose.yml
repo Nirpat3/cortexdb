@@ -62,9 +62,15 @@ services:
       - CORTEX_ENABLE_PLASTICITY=true
       - CORTEX_ENABLE_SLEEP_CYCLE=true
       - CORTEX_SLEEP_CYCLE_HOUR=2
+      - CORTEXDB_DATA_DIR=/data/superadmin
+      - CORTEXDB_MASTER_SECRET=${CORTEXDB_MASTER_SECRET:-}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
     volumes:
       - cortex-immutable:/data/immutable
       - cortex-cache:/data/cache
+      - cortex-superadmin:/data/superadmin
     depends_on:
       relational-core:
         condition: service_healthy
@@ -222,7 +228,7 @@ services:
     volumes:
       - cortex-redis-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "cortex_redis_secret", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a $${REDIS_PASSWORD:-cortex_redis_secret} ping"]
       interval: 5s
       timeout: 3s
       retries: 3
@@ -258,7 +264,7 @@ services:
     volumes:
       - cortex-stream-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "-p", "6380", "-a", "cortex_stream_secret", "ping"]
+      test: ["CMD-SHELL", "redis-cli -p 6380 -a $${STREAM_PASSWORD:-cortex_stream_secret} ping"]
       interval: 5s
       timeout: 3s
       retries: 3
@@ -385,6 +391,9 @@ services:
       - GF_AUTH_ANONYMOUS_ENABLED=true
     volumes:
       - cortex-grafana-data:/var/lib/grafana
+      - ./config/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards
+      - ./config/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards
     depends_on:
       - prometheus
       - loki
@@ -402,18 +411,27 @@ services:
   # -------------------------------------------------------
   cortex-dashboard:
     <<: *common
-    profiles: ["dashboard"]
     build:
       context: ./dashboard
       dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:5400}
     container_name: cortex-dashboard
     ports:
-      - "3400:3000"
+      - "${DASHBOARD_PORT:-3400}:3000"
     environment:
       - CORTEX_API_URL=http://cortex-router:5400
       - CORTEX_ADMIN_URL=http://cortex-router:5402
+      - NODE_ENV=production
     depends_on:
-      - cortex-router
+      cortex-router:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/ || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
     networks:
       - cortex-net
     deploy:
@@ -433,6 +451,8 @@ volumes:
   cortex-citus-w2-data:
   cortex-prometheus-data:
   cortex-grafana-data:
+  cortex-superadmin:
+  cortex-backups:
 
 networks:
   cortex-net:
@@ -440,3 +460,49 @@ networks:
     ipam:
       config:
         - subnet: 172.30.0.0/24
+
+# ============================================================
+# BACKUP & RESTORE
+# ============================================================
+#
+# A dedicated backup volume (cortex-backups) is defined above.
+# Mount it in the cortex-router service or a one-off container
+# to run backups from inside the Docker network.
+#
+# --- One-off backup via Docker ---
+#
+#   docker run --rm \
+#     --network cortexdb_cortex-net \
+#     -v cortexdb_cortex-backups:/data/backups \
+#     -v cortexdb_cortex-superadmin:/data/superadmin:ro \
+#     -v ./scripts:/scripts:ro \
+#     -e POSTGRES_PASSWORD=cortex_secret \
+#     -e REDIS_PASSWORD=cortex_redis_secret \
+#     -e STREAM_PASSWORD=cortex_stream_secret \
+#     --entrypoint /scripts/backup.sh \
+#     postgres:16-alpine --full
+#
+# --- Cron setup (host-level) ---
+#
+#   # Edit crontab: crontab -e
+#   # Run full backup daily at 2:00 AM:
+#   0 2 * * * /path/to/CortexDB/scripts/backup-cron.sh >> /var/log/cortexdb-backup.log 2>&1
+#
+#   # Environment variables for cron:
+#   BACKUP_BASE_DIR=/data/backups
+#   BACKUP_RETENTION_DAYS=30
+#   HEALTHCHECK_URL=https://hc-ping.com/your-uuid-here
+#
+# --- Restore example ---
+#
+#   docker run --rm -it \
+#     --network cortexdb_cortex-net \
+#     -v cortexdb_cortex-backups:/data/backups \
+#     -v cortexdb_cortex-superadmin:/data/superadmin \
+#     -v ./scripts:/scripts:ro \
+#     -e POSTGRES_PASSWORD=cortex_secret \
+#     --entrypoint /scripts/restore.sh \
+#     postgres:16-alpine /data/backups/20260308_020000 --yes
+#
+# See docs/backup-restore.md for full documentation.
+# ============================================================

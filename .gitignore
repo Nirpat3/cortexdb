@@ -47,3 +47,23 @@ docker-compose.override.yml
 # Logs
 *.log
 logs/
+
+# TLS certificates (generated, never commit)
+certs/
+
+# Previous secrets (rotation backup)
+.env.previous
+.env.backup.*
+.env.prod
+
+# Staging environment
+.env.staging
+
+# Dashboard build artifacts
+dashboard/.next/
+dashboard/node_modules/
+dashboard/.env.local
+
+# Claude Code
+.claude/
+dashboard/.claude/

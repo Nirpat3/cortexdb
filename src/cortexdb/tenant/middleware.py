@@ -69,7 +69,9 @@ class TenantMiddleware(BaseHTTPMiddleware):
                     return JSONResponse(status_code=401, content={
                         "error": "admin_auth_required",
                         "message": "Admin endpoints require X-Admin-Token header"})
-            elif not provided or hashlib.sha256(provided.encode()).hexdigest() != hashlib.sha256(admin_token.encode()).hexdigest():
+            elif not provided or not __import__('secrets').compare_digest(
+                hashlib.sha256(provided.encode()).hexdigest(),
+                hashlib.sha256(admin_token.encode()).hexdigest()):
                 return JSONResponse(status_code=403, content={
                     "error": "forbidden", "message": "Invalid admin token"})
             set_current_tenant("__admin__")

@@ -1,0 +1,36 @@
+from setuptools import setup, find_packages
+
+setup(
+    name="cortexdb-client",
+    version="0.9.0",
+    packages=find_packages(),
+    install_requires=["httpx>=0.28"],
+    python_requires=">=3.9",
+    description="Python client for CortexDB",
+    long_description=open("README.md", encoding="utf-8").read(),
+    long_description_content_type="text/markdown",
+    author="Nirlab Inc",
+    author_email="eng@nirlab.ai",
+    url="https://github.com/nirlab/cortexdb-client-python",
+    license="MIT",
+    classifiers=[
+        "Development Status :: 4 - Beta",
+        "Intended Audience :: Developers",
+        "License :: OSI Approved :: MIT License",
+        "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
+        "Topic :: Database",
+        "Topic :: Software Development :: Libraries :: Python Modules",
+        "Typing :: Typed",
+    ],
+    keywords="cortexdb database client sdk",
+    project_urls={
+        "Documentation": "https://docs.cortexdb.io/sdk/python",
+        "Source": "https://github.com/nirlab/cortexdb-client-python",
+        "Issues": "https://github.com/nirlab/cortexdb-client-python/issues",
+    },
+)

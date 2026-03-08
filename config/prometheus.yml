@@ -5,11 +5,20 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
+rule_files:
+  - "prometheus-rules.yml"
+
 scrape_configs:
   - job_name: 'cortexdb-router'
     static_configs:
       - targets: ['cortex-router:5400']
     metrics_path: '/health/metrics'
+
+  - job_name: 'cortexdb-dashboard'
+    static_configs:
+      - targets: ['dashboard:3000']
+    metrics_path: '/api/health'
+    scrape_interval: 30s
 
   - job_name: 'otel-collector'
     static_configs:
@@ -17,10 +26,24 @@ scrape_configs:
 
   - job_name: 'relational-core'
     static_configs:
-      - targets: ['cortex-relational:5432']
-    # PostgreSQL exporter would be needed for DB metrics
+      - targets: ['cortex-relational:9187']
+    # postgres_exporter sidecar on port 9187
 
   - job_name: 'memory-core'
     static_configs:
-      - targets: ['cortex-memory:6379']
-    # Redis exporter would be needed for Redis metrics
+      - targets: ['cortex-memory:9121']
+    # redis_exporter sidecar on port 9121
+
+  - job_name: 'agent-service'
+    static_configs:
+      - targets: ['agent-service:3006']
+    metrics_path: '/metrics'
+
+  - job_name: 'gateway'
+    static_configs:
+      - targets: ['gateway:3001']
+    metrics_path: '/metrics'
+
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']

@@ -1,0 +1,45 @@
+{
+  "name": "@cortexdb/client",
+  "version": "0.9.0",
+  "description": "Node.js/TypeScript client for CortexDB",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "cortexdb",
+    "database",
+    "client",
+    "sdk",
+    "typescript"
+  ],
+  "author": "Nirlab Inc <eng@nirlab.ai>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nirlab/cortexdb-client-node.git"
+  },
+  "bugs": {
+    "url": "https://github.com/nirlab/cortexdb-client-node/issues"
+  },
+  "homepage": "https://docs.cortexdb.io/sdk/nodejs",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  }
+}

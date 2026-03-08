@@ -439,6 +439,7 @@ class CortexDB:
     """
 
     def __init__(self, config: Optional[Dict] = None):
+        from cortexdb import __version__
         self.config = config or self._default_config()
         self.engines: Dict[str, Any] = {}
         self.amygdala = Amygdala()
@@ -455,6 +456,7 @@ class CortexDB:
         self._connected = False
         self._query_count = 0
         self._start_time = time.time()
+        self._version = __version__
 
     def _default_config(self) -> Dict:
         import os
@@ -472,6 +474,18 @@ class CortexDB:
 
     async def connect(self):
         logger.info("CortexDB v4.0 initializing...")
+
+        # Initialize centralized connection pool for relational engines
+        from cortexdb.core.pool import ConnectionPoolManager
+        self._pool_manager = ConnectionPoolManager(
+            dsn=self.config.get("relational", {}).get("url")
+        )
+        try:
+            await self._pool_manager.initialize()
+            logger.info("  + Connection pool initialized")
+        except Exception as e:
+            logger.warning(f"  x Connection pool failed: {e}")
+            self._pool_manager = None
 
         from cortexdb.engines.relational import RelationalEngine
         from cortexdb.engines.memory import MemoryEngine
@@ -494,6 +508,9 @@ class CortexDB:
         for name, (cls, cfg) in engine_classes.items():
             try:
                 engine = cls(cfg)
+                # Share the centralized pool with relational-backed engines
+                if self._pool_manager and name in ("relational", "temporal", "graph"):
+                    engine.shared_pool = self._pool_manager
                 await engine.connect()
                 self.engines[name] = engine
                 logger.info(f"  + {name.upper()} Core connected")
@@ -595,11 +612,14 @@ class CortexDB:
         return await self.write_fanout.write(data_type, payload, actor)
 
     async def health(self) -> Dict:
+        pool_stats = self._pool_manager.stats() if getattr(self, "_pool_manager", None) else {}
+        pool_health = await self._pool_manager.health_check() if getattr(self, "_pool_manager", None) else {}
         health = {
-            "status": "healthy", "version": "4.0.0",
+            "status": "healthy", "version": self._version,
             "uptime_seconds": round(time.time() - self._start_time, 1),
             "queries_total": self._query_count,
             "engines": {},
+            "connection_pool": {**pool_stats, "health": pool_health},
             "cache": self.read_cascade.stats if self.read_cascade else {},
             "plasticity": {"top_paths_count": len(self.plasticity.top_paths)},
             "amygdala": self.amygdala.stats,
@@ -616,10 +636,20 @@ class CortexDB:
         return health
 
     async def close(self):
+        # Drain async writes first
+        if self.write_fanout:
+            await self.write_fanout.drain()
+
         for name, engine in self.engines.items():
             try:
                 await engine.close()
             except Exception as e:
                 logger.warning(f"{name} close error: {e}")
+
+        # Close the centralized connection pool
+        if getattr(self, "_pool_manager", None):
+            await self._pool_manager.close()
+            self._pool_manager = None
+
         self._connected = False
         logger.info("CortexDB shut down")

@@ -4,11 +4,11 @@
 # (c) 2026 Nirlab Inc.
 # ============================================================
 
-FROM python:3.12-slim AS base
+FROM python:3.12.2-slim AS base
 
 LABEL maintainer="Nirlab Inc <eng@nirlab.ai>"
 LABEL description="CortexDB - One database to replace them all"
-LABEL version="4.0.0"
+LABEL version="5.0.0"
 
 RUN groupadd -r cortex && useradd -r -g cortex cortex
 
@@ -21,8 +21,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY src/cortexdb/ ./cortexdb/
+COPY cli_chat.py .
 
-RUN mkdir -p /data/immutable /data/cache && \
+RUN mkdir -p /data/immutable /data/cache /data/superadmin && \
     chown -R cortex:cortex /data /app
 
 USER cortex

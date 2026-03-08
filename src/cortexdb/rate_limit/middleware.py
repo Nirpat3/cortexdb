@@ -16,7 +16,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self.rate_limiter = rate_limiter
 
     async def dispatch(self, request: Request, call_next):
-        if not self.rate_limiter:
+        # Support late-binding: check app.state if not set at init
+        rl = self.rate_limiter or getattr(request.app.state, "rate_limiter", None)
+        if not rl:
             return await call_next(request)
 
         # Skip rate limiting for health endpoints
@@ -28,7 +30,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         tenant = getattr(request.state, "tenant", None)
         tenant_limits = tenant.effective_rate_limits if tenant else None
 
-        result = await self.rate_limiter.check(
+        result = await rl.check(
             tenant_id=tenant_id, agent_id=agent_id,
             endpoint=request.url.path, tenant_limits=tenant_limits)
 

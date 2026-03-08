@@ -1,0 +1,332 @@
+# Prometheus Alerting Rules for CortexDB
+# Organized into 4 groups: availability, resources, database, agents
+
+groups:
+  # ─────────────────────────────────────────────────────────────────────
+  # Group 1: Service Availability
+  # ─────────────────────────────────────────────────────────────────────
+  - name: cortexdb_availability
+    rules:
+      - alert: CortexDBDown
+        expr: up{job="cortexdb-router"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "CortexDB Router instance {{ $labels.instance }} is down"
+          description: >-
+            CortexDB Router at {{ $labels.instance }} has been unreachable
+            for more than 1 minute. All query routing is unavailable.
+            Current up status: {{ $value }}.
+          runbook_url: "https://docs.cortexdb.internal/runbooks/cortexdb-down"
+
+      - alert: DashboardDown
+        expr: up{job="cortexdb-dashboard"} == 0
+        for: 2m
+        labels:
+          severity: high
+        annotations:
+          summary: "CortexDB Dashboard is unreachable"
+          description: >-
+            The CortexDB Dashboard at {{ $labels.instance }} has failed
+            health checks for more than 2 minutes. Users cannot access
+            the management UI.
+          runbook_url: "https://docs.cortexdb.internal/runbooks/dashboard-down"
+
+      - alert: HighErrorRate
+        expr: >-
+          (
+            sum(rate(http_requests_total{job="cortexdb-router", status=~"5.."}[5m]))
+            /
+            sum(rate(http_requests_total{job="cortexdb-router"}[5m]))
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "CortexDB 5xx error rate exceeds 5%"
+          description: >-
+            The 5xx error rate on CortexDB Router has been above 5% for
+            the last 5 minutes. Current error rate: {{ $value | humanizePercentage }}.
+            Investigate application logs and downstream service health.
+          runbook_url: "https://docs.cortexdb.internal/runbooks/high-error-rate"
+
+      - alert: HighLatencyWarning
+        expr: >-
+          histogram_quantile(0.95,
+            sum(rate(http_request_duration_seconds_bucket{job="cortexdb-router"}[5m])) by (le)
+          ) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CortexDB p95 latency exceeds 2 seconds"
+          description: >-
+            The 95th percentile request latency on CortexDB Router has
+            exceeded 2 seconds for the last 5 minutes. Current p95: {{ $value | humanizeDuration }}.
+            Check for slow queries or resource saturation.
+          runbook_url: "https://docs.cortexdb.internal/runbooks/high-latency"
+
+      - alert: HighLatencyCritical
+        expr: >-
+          histogram_quantile(0.95,
+            sum(rate(http_request_duration_seconds_bucket{job="cortexdb-router"}[5m])) by (le)
+          ) > 5
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "CortexDB p95 latency exceeds 5 seconds"
+          description: >-
+            The 95th percentile request latency on CortexDB Router has
+            exceeded 5 seconds for the last 5 minutes. Current p95: {{ $value | humanizeDuration }}.
+            Service is critically degraded. Immediate investigation required.
+          runbook_url: "https://docs.cortexdb.internal/runbooks/high-latency#critical"
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Group 2: System Resources
+  # ─────────────────────────────────────────────────────────────────────
+  - name: cortexdb_resources
+    rules:
+      - alert: HighCPUWarning
+        expr: >-
+          (
+            1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m]))
+          ) * 100 > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage on {{ $labels.instance }}"
+          description: >-
+            CPU usage on {{ $labels.instance }} has been above 80% for
+            the last 5 minutes. Current usage: {{ $value | printf "%.1f" }}%.
+            Consider scaling or investigating runaway processes.
+          runbook_url: "https://docs.cortexdb.internal/runbooks/high-cpu"
+
+      - alert: HighCPUCritical
+        expr: >-
+          (
+            1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[2m]))
+          ) * 100 > 95
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical CPU usage on {{ $labels.instance }}"
+          description: >-
+            CPU usage on {{ $labels.instance }} has exceeded 95% for
+            the last 2 minutes. Current usage: {{ $value | printf "%.1f" }}%.
+            Immediate action required to prevent service degradation.
+          runbook_url: "https://docs.cortexdb.internal/runbooks/high-cpu#critical"
+
+      - alert: HighMemoryWarning
+        expr: >-
+          (
+            1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)
+          ) * 100 > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage on {{ $labels.instance }}"
+          description: >-
+            Memory usage on {{ $labels.instance }} has been above 80% for
+            the last 5 minutes. Current usage: {{ $value | printf "%.1f" }}%.
+            Check for memory leaks or consider adding capacity.
+          runbook_url: "https://docs.cortexdb.internal/runbooks/high-memory"
+
+      - alert: HighMemoryCritical
+        expr: >-
+          (
+            1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)
+          ) * 100 > 95
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical memory usage on {{ $labels.instance }}"
+          description: >-
+            Memory usage on {{ $labels.instance }} has exceeded 95% for
+            the last 2 minutes. Current usage: {{ $value | printf "%.1f" }}%.
+            OOM kills are imminent. Immediate action required.
+          runbook_url: "https://docs.cortexdb.internal/runbooks/high-memory#critical"
+
+      - alert: DiskAlmostFullWarning
+        expr: >-
+          (
+            1 - (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"})
+          ) * 100 > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disk usage above 80% on {{ $labels.instance }} ({{ $labels.mountpoint }})"
+          description: >-
+            Disk usage on {{ $labels.instance }} mount {{ $labels.mountpoint }}
+            has exceeded 80%. Current usage: {{ $value | printf "%.1f" }}%.
+            Plan capacity expansion or clean up unused data.
+          runbook_url: "https://docs.cortexdb.internal/runbooks/disk-full"
+
+      - alert: DiskAlmostFullCritical
+        expr: >-
+          (
+            1 - (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"})
+          ) * 100 > 90
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Disk usage above 90% on {{ $labels.instance }} ({{ $labels.mountpoint }})"
+          description: >-
+            Disk usage on {{ $labels.instance }} mount {{ $labels.mountpoint }}
+            has exceeded 90%. Current usage: {{ $value | printf "%.1f" }}%.
+            Database writes may fail imminently. Urgent action required.
+          runbook_url: "https://docs.cortexdb.internal/runbooks/disk-full#critical"
+
+      - alert: TooManyConnections
+        expr: >-
+          (
+            pg_stat_activity_count{job="relational-core"}
+            /
+            pg_settings_max_connections{job="relational-core"}
+          ) * 100 > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Database connections above 80% of max on {{ $labels.instance }}"
+          description: >-
+            PostgreSQL on {{ $labels.instance }} is using {{ $value | printf "%.0f" }}%
+            of its maximum connection limit. Current active connections may
+            starve new requests. Review connection pooling configuration.
+          runbook_url: "https://docs.cortexdb.internal/runbooks/too-many-connections"
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Group 3: Database Health
+  # ─────────────────────────────────────────────────────────────────────
+  - name: cortexdb_database
+    rules:
+      - alert: PostgresDown
+        expr: pg_up{job="relational-core"} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL (relational-core) is down"
+          description: >-
+            PostgreSQL at {{ $labels.instance }} has been unreachable for
+            more than 30 seconds. All relational queries will fail.
+            Check container health and PostgreSQL logs.
+          runbook_url: "https://docs.cortexdb.internal/runbooks/postgres-down"
+
+      - alert: RedisDown
+        expr: redis_up{job="memory-core"} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Redis (memory-core) is down"
+          description: >-
+            Redis at {{ $labels.instance }} has been unreachable for more
+            than 30 seconds. Caching, sessions, and BullMQ queues are
+            unavailable. Check container health and Redis logs.
+          runbook_url: "https://docs.cortexdb.internal/runbooks/redis-down"
+
+      - alert: ReplicationLagWarning
+        expr: >-
+          pg_replication_lag_seconds{job="relational-core"} > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Citus replication lag exceeds 10s on {{ $labels.instance }}"
+          description: >-
+            Replication lag on {{ $labels.instance }} has been above 10
+            seconds for 5 minutes. Current lag: {{ $value | humanizeDuration }}.
+            Read replicas may serve stale data.
+          runbook_url: "https://docs.cortexdb.internal/runbooks/replication-lag"
+
+      - alert: ReplicationLagCritical
+        expr: >-
+          pg_replication_lag_seconds{job="relational-core"} > 60
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Citus replication lag exceeds 60s on {{ $labels.instance }}"
+          description: >-
+            Replication lag on {{ $labels.instance }} has exceeded 60
+            seconds for 2 minutes. Current lag: {{ $value | humanizeDuration }}.
+            Data consistency is at risk. Check network and I/O on replicas.
+          runbook_url: "https://docs.cortexdb.internal/runbooks/replication-lag#critical"
+
+      - alert: SlowQueries
+        expr: >-
+          rate(pg_stat_statements_mean_exec_time_ms_sum{job="relational-core"}[10m])
+          /
+          rate(pg_stat_statements_mean_exec_time_ms_count{job="relational-core"}[10m])
+          > 500
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Average query execution time exceeds 500ms"
+          description: >-
+            The average PostgreSQL query execution time on {{ $labels.instance }}
+            has exceeded 500ms over the last 10 minutes. Current average:
+            {{ $value | printf "%.0f" }}ms. Review slow query log and
+            check for missing indexes or lock contention.
+          runbook_url: "https://docs.cortexdb.internal/runbooks/slow-queries"
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Group 4: Agent System Health
+  # ─────────────────────────────────────────────────────────────────────
+  - name: cortexdb_agents
+    rules:
+      - alert: AgentStuck
+        expr: >-
+          (time() - cortexdb_agent_last_activity_timestamp{state="working"}) > 1800
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Agent {{ $labels.agent_id }} stuck in working state"
+          description: >-
+            Agent {{ $labels.agent_id }} ({{ $labels.agent_name }}) has
+            been in "working" state for over 30 minutes without activity.
+            Idle duration: {{ $value | humanizeDuration }}. The agent may
+            be deadlocked or waiting on an unresponsive external service.
+          runbook_url: "https://docs.cortexdb.internal/runbooks/agent-stuck"
+
+      - alert: TaskQueueBacklog
+        expr: >-
+          sum by (queue) (cortexdb_task_queue_pending_total) > 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Task queue {{ $labels.queue }} backlog exceeds 100 pending tasks"
+          description: >-
+            The {{ $labels.queue }} task queue has had more than 100
+            pending tasks for the last 10 minutes. Current backlog:
+            {{ $value | printf "%.0f" }} tasks. Workers may be
+            under-provisioned or downstream services are slow.
+          runbook_url: "https://docs.cortexdb.internal/runbooks/task-queue-backlog"
+
+      - alert: LLMProviderDown
+        expr: >-
+          sum(rate(cortexdb_llm_requests_total{status="success"}[5m])) == 0
+          and
+          sum(rate(cortexdb_llm_requests_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "All LLM provider calls are failing"
+          description: >-
+            No successful LLM calls have been recorded in the last 5
+            minutes, while requests are still being attempted. Current
+            failure rate: 100%. All agent cognitive tasks are blocked.
+            Check LLM API keys, rate limits, and provider status pages.
+          runbook_url: "https://docs.cortexdb.internal/runbooks/llm-provider-down"
