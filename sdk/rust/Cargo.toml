@@ -1,0 +1,16 @@
+[package]
+name = "cortexdb-client"
+version = "0.1.0"
+edition = "2021"
+description = "Rust client for CortexDB"
+license = "MIT"
+repository = "https://github.com/nirlab/cortexdb-client-rust"
+keywords = ["cortexdb", "database", "client", "agent"]
+categories = ["database", "api-bindings"]
+
+[dependencies]
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }

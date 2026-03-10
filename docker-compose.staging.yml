@@ -1,0 +1,311 @@
+# ============================================================
+# CortexDB - Staging Override
+# Usage: docker compose -f docker-compose.yml -f docker-compose.staging.yml up -d
+# (c) 2026 Nirlab Inc. All Rights Reserved.
+# ============================================================
+#
+# STAGING is a pre-production environment that mirrors production
+# behavior while keeping ports accessible for debugging.
+#
+# Key differences from production:
+#   - No Nginx/TLS (direct port access for testing)
+#   - Moderate resource limits (between dev and prod)
+#   - Observability: Prometheus + Grafana only (no Loki/Tempo)
+#   - Admin ports NOT exposed (only main API port)
+#   - Secrets still required (enforced via :? syntax)
+#
+# Before using:
+#   1. Copy .env.staging.example to .env.staging
+#   2. Fill in all required secrets
+#   3. Run: docker compose -f docker-compose.yml -f docker-compose.staging.yml --env-file .env.staging up -d
+#
+# ============================================================
+
+x-staging-common: &staging-common
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "25m"
+      max-file: "3"
+
+services:
+
+  # -------------------------------------------------------
+  # CortexDB Router — only main API port exposed
+  # -------------------------------------------------------
+  cortex-router:
+    <<: *staging-common
+    ports:
+      - "5400:5400"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5401/health/live"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+    environment:
+      - CORTEX_MODE=staging
+      - CORTEX_PORT=5400
+      - CORTEX_HEALTH_PORT=5401
+      - CORTEX_ADMIN_PORT=5402
+      - RELATIONAL_CORE_URL=postgresql://cortex:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@relational-core:5432/cortexdb
+      - MEMORY_CORE_URL=redis://memory-core:6379/0
+      - MEMORY_CORE_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
+      - VECTOR_CORE_URL=http://vector-core:6333
+      - TEMPORAL_CORE_URL=postgresql://cortex:${POSTGRES_PASSWORD}@relational-core:5432/cortexdb
+      - GRAPH_CORE_URL=postgresql://cortex:${POSTGRES_PASSWORD}@relational-core:5432/cortexdb
+      - STREAM_CORE_URL=redis://stream-core:6380/0
+      - STREAM_CORE_PASSWORD=${STREAM_PASSWORD:?STREAM_PASSWORD must be set}
+      - IMMUTABLE_CORE_PATH=/data/immutable
+      - CORTEX_SECRET_KEY=${CORTEX_SECRET_KEY:?CORTEX_SECRET_KEY must be set (min 64 chars)}
+      - CORTEX_ADMIN_TOKEN=${CORTEX_ADMIN_TOKEN:?CORTEX_ADMIN_TOKEN must be set}
+      - CORTEX_CORS_ORIGINS=${CORTEX_CORS_ORIGINS:-http://localhost:3400,http://staging.cortexdb.example.com}
+      - CORTEX_ENABLE_AMYGDALA=true
+      - CORTEX_ENABLE_PLASTICITY=true
+      - CORTEX_ENABLE_SLEEP_CYCLE=true
+      - CORTEX_SLEEP_CYCLE_HOUR=2
+      - CORTEXDB_DATA_DIR=/data/superadmin
+      - CORTEXDB_MASTER_SECRET=${CORTEXDB_MASTER_SECRET:?CORTEXDB_MASTER_SECRET must be set}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  # -------------------------------------------------------
+  # Relational Core — port exposed for debugging
+  # -------------------------------------------------------
+  relational-core:
+    <<: *staging-common
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cortex -d cortexdb"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    environment:
+      - POSTGRES_USER=cortex
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      - POSTGRES_DB=cortexdb
+      - POSTGRES_SHARED_BUFFERS=512MB
+      - POSTGRES_EFFECTIVE_CACHE_SIZE=1536MB
+      - POSTGRES_WORK_MEM=32MB
+      - POSTGRES_MAINTENANCE_WORK_MEM=256MB
+      - POSTGRES_WAL_BUFFERS=32MB
+      - POSTGRES_MAX_CONNECTIONS=200
+      - POSTGRES_MAX_WAL_SENDERS=10
+      - POSTGRES_WAL_LEVEL=logical
+    volumes:
+      - cortex-pg-data:/var/lib/postgresql/data
+      - cortex-backups:/backups
+      - ./db/migrations/001_schema.sql:/docker-entrypoint-initdb.d/01-init.sql
+      - ./db/migrations/002_sharding.sql:/docker-entrypoint-initdb.d/02-sharding.sql
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 3G
+        reservations:
+          cpus: "1.0"
+          memory: 1G
+
+  # -------------------------------------------------------
+  # Citus Workers — moderate resources
+  # -------------------------------------------------------
+  citus-worker-1:
+    <<: *staging-common
+    environment:
+      - POSTGRES_USER=cortex
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      - POSTGRES_DB=cortexdb
+      - POSTGRES_SHARED_BUFFERS=256MB
+      - POSTGRES_EFFECTIVE_CACHE_SIZE=768MB
+      - POSTGRES_WORK_MEM=16MB
+      - POSTGRES_MAX_CONNECTIONS=200
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  citus-worker-2:
+    <<: *staging-common
+    environment:
+      - POSTGRES_USER=cortex
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      - POSTGRES_DB=cortexdb
+      - POSTGRES_SHARED_BUFFERS=256MB
+      - POSTGRES_EFFECTIVE_CACHE_SIZE=768MB
+      - POSTGRES_WORK_MEM=16MB
+      - POSTGRES_MAX_CONNECTIONS=200
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  # -------------------------------------------------------
+  # Memory Core — no port exposure, moderate resources
+  # -------------------------------------------------------
+  memory-core:
+    <<: *staging-common
+    ports: !reset []
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    command: >
+      redis-server
+      --maxmemory 768mb
+      --maxmemory-policy allkeys-lru
+      --appendonly yes
+      --appendfsync everysec
+      --save 60 1000
+      --save 300 100
+      --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+  # -------------------------------------------------------
+  # Stream Core — no port exposure, moderate resources
+  # -------------------------------------------------------
+  stream-core:
+    <<: *staging-common
+    ports: !reset []
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "6380", "-a", "${STREAM_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    command: >
+      redis-server
+      --port 6380
+      --maxmemory 384mb
+      --maxmemory-policy noeviction
+      --appendonly yes
+      --appendfsync everysec
+      --requirepass ${STREAM_PASSWORD:?STREAM_PASSWORD must be set}
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+
+  # -------------------------------------------------------
+  # Vector Core — no port exposure, moderate resources
+  # -------------------------------------------------------
+  vector-core:
+    <<: *staging-common
+    ports: !reset []
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+  # -------------------------------------------------------
+  # Dashboard — exposed on port 3400, staging API URL
+  # -------------------------------------------------------
+  cortex-dashboard:
+    <<: *staging-common
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/ || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:5400}
+    ports:
+      - "${DASHBOARD_PORT:-3400}:3000"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 384M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+
+  # -------------------------------------------------------
+  # Observability — Prometheus + Grafana only (save resources)
+  # Loki and Tempo remain disabled (profile-gated in base)
+  # -------------------------------------------------------
+  prometheus:
+    <<: *staging-common
+    profiles: []
+    ports:
+      - "9090:9090"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+
+  grafana:
+    <<: *staging-common
+    profiles: []
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:?GRAFANA_PASSWORD must be set}
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_SERVER_ROOT_URL=http://localhost:3001/
+    depends_on:
+      - prometheus
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+
+  otel-collector:
+    <<: *staging-common
+    profiles: []
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+volumes:
+  cortex-backups:

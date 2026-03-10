@@ -8,13 +8,16 @@
 # The Python service handles cross-engine queries, semantic caching, and agent ops.
 # For simple CRUD, use the TypeScript SDK (@cortexdb/sdk) to connect directly.
 #
+# Usage:
+#   docker compose up -d                     # Start all services
+#   docker compose up -d cortex-router       # Start router + dependencies
+#   docker compose --profile observability up -d  # Include monitoring stack
+#
 # HARDWARE REQUIREMENTS:
 #   Minimum:     2 CPU, 4 GB RAM, 50 GB SSD
 #   Recommended: 4 CPU, 16 GB RAM, 200 GB NVMe
 #   Enterprise:  8+ CPU, 32+ GB RAM, 500 GB+ NVMe
 # ============================================================
-
-version: "3.9"
 
 x-common: &common
   restart: unless-stopped
@@ -25,10 +28,10 @@ x-common: &common
       max-file: "3"
 
 services:
-  # ================================================
-  # BRAIN REGION: Thalamus + Amygdala + Prefrontal Cortex
-  # The CortexDB Router, Security Engine, and Query Optimizer
-  # ================================================
+
+  # -------------------------------------------------------
+  # CortexDB Router — Query Optimizer and Security Engine
+  # -------------------------------------------------------
   cortex-router:
     <<: *common
     build:
@@ -60,9 +63,15 @@ services:
       - CORTEX_ENABLE_PLASTICITY=true
       - CORTEX_ENABLE_SLEEP_CYCLE=true
       - CORTEX_SLEEP_CYCLE_HOUR=2
+      - CORTEXDB_DATA_DIR=/data/superadmin
+      - CORTEXDB_MASTER_SECRET=${CORTEXDB_MASTER_SECRET:-}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
     volumes:
       - cortex-immutable:/data/immutable
       - cortex-cache:/data/cache
+      - cortex-superadmin:/data/superadmin
     depends_on:
       relational-core:
         condition: service_healthy
@@ -87,13 +96,10 @@ services:
           cpus: "0.5"
           memory: 512M
 
-  # ================================================
-  # BRAIN REGION: Neocortex (Long-Term Memory)
-  # RelationalCore + TemporalCore + GraphCore + Citus Sharding
-  # Citus 12 (PostgreSQL 16) + TimescaleDB + Apache AGE
-  # Primary storage: ACID transactions, graph CTEs, time-series
-  # SCALES: Petabyte via Citus distributed tables
-  # ================================================
+  # -------------------------------------------------------
+  # Relational Core — Citus 12 (PostgreSQL 16)
+  # ACID transactions, graph CTEs (Apache AGE), time-series (TimescaleDB)
+  # -------------------------------------------------------
   relational-core:
     <<: *common
     image: citusdata/citus:12.1
@@ -102,7 +108,7 @@ services:
       - "5432:5432"
     environment:
       - POSTGRES_USER=cortex
-      - POSTGRES_PASSWORD=cortex_secret
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-cortex_secret}
       - POSTGRES_DB=cortexdb
       - POSTGRES_SHARED_BUFFERS=512MB
       - POSTGRES_EFFECTIVE_CACHE_SIZE=1536MB
@@ -114,8 +120,8 @@ services:
       - POSTGRES_WAL_LEVEL=logical
     volumes:
       - cortex-pg-data:/var/lib/postgresql/data
-      - ./init-scripts/relational-core-init.sql:/docker-entrypoint-initdb.d/01-init.sql
-      - ./init-scripts/sharding-init.sql:/docker-entrypoint-initdb.d/02-sharding.sql
+      - ./db/migrations/001_schema.sql:/docker-entrypoint-initdb.d/01-init.sql
+      - ./db/migrations/002_sharding.sql:/docker-entrypoint-initdb.d/02-sharding.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U cortex -d cortexdb"]
       interval: 5s
@@ -133,18 +139,16 @@ services:
           cpus: "1.0"
           memory: 1G
 
-  # ================================================
-  # CITUS WORKERS: Horizontal shard nodes
-  # Add more workers for linear scale-out
-  # Each worker stores a subset of shards
-  # ================================================
+  # -------------------------------------------------------
+  # Citus Workers — Horizontal Shard Nodes
+  # -------------------------------------------------------
   citus-worker-1:
     <<: *common
     image: citusdata/citus:12.1
     container_name: cortex-citus-worker-1
     environment:
       - POSTGRES_USER=cortex
-      - POSTGRES_PASSWORD=cortex_secret
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-cortex_secret}
       - POSTGRES_DB=cortexdb
       - POSTGRES_SHARED_BUFFERS=256MB
       - POSTGRES_EFFECTIVE_CACHE_SIZE=768MB
@@ -177,7 +181,7 @@ services:
     container_name: cortex-citus-worker-2
     environment:
       - POSTGRES_USER=cortex
-      - POSTGRES_PASSWORD=cortex_secret
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-cortex_secret}
       - POSTGRES_DB=cortexdb
       - POSTGRES_SHARED_BUFFERS=256MB
       - POSTGRES_EFFECTIVE_CACHE_SIZE=768MB
@@ -204,11 +208,9 @@ services:
           cpus: "0.5"
           memory: 512M
 
-  # ================================================
-  # MemoryCore — Fast KV Cache
-  # Redis 7 (Cache + Sessions + Pub/Sub)
-  # SDK can also connect directly for cache ops
-  # ================================================
+  # -------------------------------------------------------
+  # Memory Core — Redis 7 (Cache + Sessions + Pub/Sub)
+  # -------------------------------------------------------
   memory-core:
     <<: *common
     image: redis:7-alpine
@@ -223,11 +225,11 @@ services:
       --appendfsync everysec
       --save 60 1000
       --save 300 100
-      --requirepass cortex_redis_secret
+      --requirepass ${REDIS_PASSWORD:-cortex_redis_secret}
     volumes:
       - cortex-redis-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "cortex_redis_secret", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a $${REDIS_PASSWORD:-cortex_redis_secret} ping"]
       interval: 5s
       timeout: 3s
       retries: 3
@@ -242,11 +244,10 @@ services:
           cpus: "0.25"
           memory: 256M
 
-  # ================================================
-  # StreamCore — Event Streaming
-  # Redis instance #2 for Streams + Pub/Sub
+  # -------------------------------------------------------
+  # Stream Core — Redis Streams (Event Streaming)
   # Lightweight event bus for agent coordination
-  # ================================================
+  # -------------------------------------------------------
   stream-core:
     <<: *common
     image: redis:7-alpine
@@ -260,11 +261,11 @@ services:
       --maxmemory-policy noeviction
       --appendonly yes
       --appendfsync everysec
-      --requirepass cortex_stream_secret
+      --requirepass ${STREAM_PASSWORD:-cortex_stream_secret}
     volumes:
       - cortex-stream-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "-p", "6380", "-a", "cortex_stream_secret", "ping"]
+      test: ["CMD-SHELL", "redis-cli -p 6380 -a $${STREAM_PASSWORD:-cortex_stream_secret} ping"]
       interval: 5s
       timeout: 3s
       retries: 3
@@ -276,11 +277,10 @@ services:
           cpus: "0.5"
           memory: 384M
 
-  # ================================================
-  # VectorCore — Semantic Search
-  # Qdrant (self-hosted vector DB)
-  # Powers R2 semantic cache and embedding search
-  # ================================================
+  # -------------------------------------------------------
+  # Vector Core — Qdrant (Semantic Search)
+  # Powers semantic cache and embedding search
+  # -------------------------------------------------------
   vector-core:
     <<: *common
     image: qdrant/qdrant:latest
@@ -314,19 +314,19 @@ services:
   # TemporalCore runs INSIDE relational-core as TimescaleDB extension
   # No separate containers needed
 
-  # ================================================
-  # OBSERVABILITY STACK (DOC-019 Section 2.4)
-  # Grafana + Prometheus + Loki + Tempo + OTel Collector
-  # ================================================
+  # -------------------------------------------------------
+  # Observability Stack (profile: observability)
+  # -------------------------------------------------------
   otel-collector:
     <<: *common
+    profiles: ["observability"]
     image: otel/opentelemetry-collector:latest
     container_name: cortex-otel
     ports:
       - "4317:4317"
       - "4318:4318"
     volumes:
-      - ./observability/otel-config.yml:/etc/otelcol/config.yaml
+      - ./config/otel-config.yml:/etc/otelcol/config.yaml
     networks:
       - cortex-net
     deploy:
@@ -337,12 +337,13 @@ services:
 
   prometheus:
     <<: *common
+    profiles: ["observability"]
     image: prom/prometheus:latest
     container_name: cortex-prometheus
     ports:
       - "9090:9090"
     volumes:
-      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml
       - cortex-prometheus-data:/prometheus
     networks:
       - cortex-net
@@ -354,6 +355,7 @@ services:
 
   loki:
     <<: *common
+    profiles: ["observability"]
     image: grafana/loki:latest
     container_name: cortex-loki
     ports:
@@ -368,6 +370,7 @@ services:
 
   tempo:
     <<: *common
+    profiles: ["observability"]
     image: grafana/tempo:latest
     container_name: cortex-tempo
     ports:
@@ -383,15 +386,19 @@ services:
 
   grafana:
     <<: *common
+    profiles: ["observability"]
     image: grafana/grafana:latest
     container_name: cortex-grafana
     ports:
       - "3000:3000"
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=cortex_admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-cortex_admin}
       - GF_AUTH_ANONYMOUS_ENABLED=true
     volumes:
       - cortex-grafana-data:/var/lib/grafana
+      - ./config/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards
+      - ./config/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards
     depends_on:
       - prometheus
       - loki
@@ -404,22 +411,32 @@ services:
           cpus: "0.5"
           memory: 512M
 
-  # ================================================
-  # DASHBOARD: CortexDB Admin UI
-  # ================================================
+  # -------------------------------------------------------
+  # Dashboard — CortexDB Admin UI
+  # -------------------------------------------------------
   cortex-dashboard:
     <<: *common
     build:
       context: ./dashboard
       dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:5400}
     container_name: cortex-dashboard
     ports:
-      - "3400:3000"
+      - "${DASHBOARD_PORT:-3400}:3000"
     environment:
       - CORTEX_API_URL=http://cortex-router:5400
       - CORTEX_ADMIN_URL=http://cortex-router:5402
+      - NODE_ENV=production
     depends_on:
-      - cortex-router
+      cortex-router:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/ || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
     networks:
       - cortex-net
     deploy:
@@ -430,53 +447,17 @@ services:
 
 volumes:
   cortex-pg-data:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${CORTEX_DATA_PATH:-./data}/postgresql
   cortex-redis-data:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${CORTEX_DATA_PATH:-./data}/redis
   cortex-stream-data:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${CORTEX_DATA_PATH:-./data}/stream
   cortex-vector-data:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${CORTEX_DATA_PATH:-./data}/vector
   cortex-immutable:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${CORTEX_DATA_PATH:-./data}/immutable
   cortex-cache:
-    driver: local
   cortex-citus-w1-data:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${CORTEX_DATA_PATH:-./data}/citus-w1
   cortex-citus-w2-data:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${CORTEX_DATA_PATH:-./data}/citus-w2
   cortex-prometheus-data:
-    driver: local
   cortex-grafana-data:
-    driver: local
+  cortex-superadmin:
+  cortex-backups:
 
 networks:
   cortex-net:
@@ -484,3 +465,49 @@ networks:
     ipam:
       config:
         - subnet: 172.30.0.0/24
+
+# ============================================================
+# BACKUP & RESTORE
+# ============================================================
+#
+# A dedicated backup volume (cortex-backups) is defined above.
+# Mount it in the cortex-router service or a one-off container
+# to run backups from inside the Docker network.
+#
+# --- One-off backup via Docker ---
+#
+#   docker run --rm \
+#     --network cortexdb_cortex-net \
+#     -v cortexdb_cortex-backups:/data/backups \
+#     -v cortexdb_cortex-superadmin:/data/superadmin:ro \
+#     -v ./scripts:/scripts:ro \
+#     -e POSTGRES_PASSWORD=cortex_secret \
+#     -e REDIS_PASSWORD=cortex_redis_secret \
+#     -e STREAM_PASSWORD=cortex_stream_secret \
+#     --entrypoint /scripts/backup.sh \
+#     postgres:16-alpine --full
+#
+# --- Cron setup (host-level) ---
+#
+#   # Edit crontab: crontab -e
+#   # Run full backup daily at 2:00 AM:
+#   0 2 * * * /path/to/CortexDB/scripts/backup-cron.sh >> /var/log/cortexdb-backup.log 2>&1
+#
+#   # Environment variables for cron:
+#   BACKUP_BASE_DIR=/data/backups
+#   BACKUP_RETENTION_DAYS=30
+#   HEALTHCHECK_URL=https://hc-ping.com/your-uuid-here
+#
+# --- Restore example ---
+#
+#   docker run --rm -it \
+#     --network cortexdb_cortex-net \
+#     -v cortexdb_cortex-backups:/data/backups \
+#     -v cortexdb_cortex-superadmin:/data/superadmin \
+#     -v ./scripts:/scripts:ro \
+#     -e POSTGRES_PASSWORD=cortex_secret \
+#     --entrypoint /scripts/restore.sh \
+#     postgres:16-alpine /data/backups/20260308_020000 --yes
+#
+# See docs/backup-restore.md for full documentation.
+# ============================================================

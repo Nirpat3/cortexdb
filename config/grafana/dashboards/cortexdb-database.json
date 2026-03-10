@@ -1,0 +1,988 @@
+{
+  "uid": "cortexdb-database",
+  "title": "CortexDB / Database Infrastructure",
+  "description": "PostgreSQL, Redis, and Qdrant infrastructure metrics for the CortexDB storage tiers",
+  "tags": ["cortexdb", "database", "infrastructure"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "15s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "fiscalYearStartMonth": 0,
+  "liveNow": false,
+  "style": "dark",
+  "editable": true,
+  "graphTooltip": 1,
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 100,
+      "title": "PostgreSQL (Neocortex)",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false
+    },
+    {
+      "id": 1,
+      "title": "PG Active Connections",
+      "description": "Number of active PostgreSQL connections currently executing queries",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 100 },
+              { "color": "orange", "value": 250 },
+              { "color": "red", "value": 400 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "orientation": "auto",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "pg_stat_activity_count{state=\"active\",datname=\"cortexdb\"}",
+          "legendFormat": "Active",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "PG Idle Connections",
+      "description": "Connections in idle state waiting for new queries",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 50 },
+              { "color": "red", "value": 200 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "orientation": "auto",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "pg_stat_activity_count{state=\"idle\",datname=\"cortexdb\"}",
+          "legendFormat": "Idle",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "PG Total Connections",
+      "description": "Total connections across all states vs maximum configured limit (500 prod, 300 dev)",
+      "type": "gauge",
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "max": 500,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 250 },
+              { "color": "orange", "value": 400 },
+              { "color": "red", "value": 475 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(pg_stat_activity_count{datname=\"cortexdb\"})",
+          "legendFormat": "Total",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Query Cache Hit Ratio",
+      "description": "Ratio of blocks served from shared_buffers cache vs disk reads (target >99%)",
+      "type": "gauge",
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 2,
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 0.90 },
+              { "color": "yellow", "value": 0.95 },
+              { "color": "green", "value": 0.99 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "pg_stat_database_blks_hit{datname=\"cortexdb\"} / (pg_stat_database_blks_hit{datname=\"cortexdb\"} + pg_stat_database_blks_read{datname=\"cortexdb\"})",
+          "legendFormat": "Hit Ratio",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Replication Lag",
+      "description": "WAL replication lag between primary and Citus workers in bytes",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1048576 },
+              { "color": "orange", "value": 10485760 },
+              { "color": "red", "value": 104857600 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "orientation": "auto",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "pg_replication_lag_bytes",
+          "legendFormat": "{{ application_name }}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Transactions / sec",
+      "description": "Committed and rolled-back transactions per second",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1000 },
+              { "color": "red", "value": 5000 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "orientation": "auto",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(pg_stat_database_xact_commit{datname=\"cortexdb\"}[5m])) + sum(rate(pg_stat_database_xact_rollback{datname=\"cortexdb\"}[5m]))",
+          "legendFormat": "TPS",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "PostgreSQL Connections Over Time",
+      "description": "Connection count by state over time",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+      "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 20,
+            "gradientMode": "scheme",
+            "showPoints": "never",
+            "stacking": { "mode": "normal", "group": "A" },
+            "thresholdsStyle": { "mode": "line+area" }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "transparent", "value": null },
+              { "color": "red", "value": 450 }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "active" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "idle" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "blue", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "idle in transaction" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }]
+          }
+        ]
+      },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["mean", "max"] }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "pg_stat_activity_count{datname=\"cortexdb\"}",
+          "legendFormat": "{{ state }}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Disk I/O (Blocks Read vs Hit)",
+      "description": "Block read rate from disk vs cache hits from shared_buffers",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "gradientMode": "scheme",
+            "showPoints": "never",
+            "thresholdsStyle": { "mode": "off" }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Blocks Read (Disk)" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Blocks Hit (Cache)" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }]
+          }
+        ]
+      },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["mean", "max"] }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(pg_stat_database_blks_read{datname=\"cortexdb\"}[5m])",
+          "legendFormat": "Blocks Read (Disk)"
+        },
+        {
+          "refId": "B",
+          "expr": "rate(pg_stat_database_blks_hit{datname=\"cortexdb\"}[5m])",
+          "legendFormat": "Blocks Hit (Cache)"
+        }
+      ]
+    },
+    {
+      "id": 200,
+      "title": "Redis (Working Memory + Thalamic Relay)",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 13 },
+      "collapsed": false
+    },
+    {
+      "id": 9,
+      "title": "Redis Memory Used (memory-core)",
+      "description": "Current memory consumption of the Redis working-memory instance",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 268435456 },
+              { "color": "orange", "value": 402653184 },
+              { "color": "red", "value": 503316480 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "orientation": "auto",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "redis_memory_used_bytes{instance=~\".*:6379\"}",
+          "legendFormat": "Used",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Redis Memory Used (stream-core)",
+      "description": "Memory consumption of the Redis stream/event instance",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 134217728 },
+              { "color": "orange", "value": 201326592 },
+              { "color": "red", "value": 251658240 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "orientation": "auto",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "redis_memory_used_bytes{instance=~\".*:6380\"}",
+          "legendFormat": "Used",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "title": "Redis Connected Clients",
+      "description": "Number of connected clients on each Redis instance",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 100 },
+              { "color": "red", "value": 500 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "orientation": "auto",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "redis_connected_clients{instance=~\".*:6379\"}",
+          "legendFormat": "memory-core",
+          "instant": true
+        },
+        {
+          "refId": "B",
+          "expr": "redis_connected_clients{instance=~\".*:6380\"}",
+          "legendFormat": "stream-core",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "Redis Hit Rate",
+      "description": "Cache hit percentage for Redis keyspace lookups",
+      "type": "gauge",
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1,
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 0.70 },
+              { "color": "yellow", "value": 0.85 },
+              { "color": "green", "value": 0.95 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "redis_keyspace_hits_total{instance=~\".*:6379\"} / (redis_keyspace_hits_total{instance=~\".*:6379\"} + redis_keyspace_misses_total{instance=~\".*:6379\"})",
+          "legendFormat": "Hit Rate",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "title": "Redis Keys Count",
+      "description": "Total number of keys in each Redis instance",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 100000 },
+              { "color": "red", "value": 1000000 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "orientation": "auto",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(redis_db_keys{instance=~\".*:6379\"})",
+          "legendFormat": "memory-core",
+          "instant": true
+        },
+        {
+          "refId": "B",
+          "expr": "sum(redis_db_keys{instance=~\".*:6380\"})",
+          "legendFormat": "stream-core",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "title": "Redis Evictions",
+      "description": "Keys evicted due to maxmemory policy",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 100 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "orientation": "auto",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "increase(redis_evicted_keys_total{instance=~\".*:6379\"}[5m])",
+          "legendFormat": "Evictions (5m)",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "title": "Redis Commands / sec",
+      "description": "Command processing rate for both Redis instances",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 18 },
+      "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "gradientMode": "scheme",
+            "showPoints": "never",
+            "thresholdsStyle": { "mode": "off" }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "memory-core" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "blue", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "stream-core" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "purple", "mode": "fixed" } }]
+          }
+        ]
+      },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["mean", "max"] }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(redis_commands_processed_total{instance=~\".*:6379\"}[5m])",
+          "legendFormat": "memory-core"
+        },
+        {
+          "refId": "B",
+          "expr": "rate(redis_commands_processed_total{instance=~\".*:6380\"}[5m])",
+          "legendFormat": "stream-core"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "title": "Redis Memory Over Time",
+      "description": "Memory consumption trend for both Redis instances",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 18 },
+      "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 20,
+            "gradientMode": "scheme",
+            "showPoints": "never",
+            "thresholdsStyle": { "mode": "line+area" }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "transparent", "value": null },
+              { "color": "red", "value": 503316480 }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "memory-core Used" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "blue", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "memory-core Max" },
+            "properties": [
+              { "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } },
+              { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [10, 10] } },
+              { "id": "custom.fillOpacity", "value": 0 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "stream-core Used" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "purple", "mode": "fixed" } }]
+          }
+        ]
+      },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["mean", "max"] }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "redis_memory_used_bytes{instance=~\".*:6379\"}",
+          "legendFormat": "memory-core Used"
+        },
+        {
+          "refId": "B",
+          "expr": "redis_memory_max_bytes{instance=~\".*:6379\"}",
+          "legendFormat": "memory-core Max"
+        },
+        {
+          "refId": "C",
+          "expr": "redis_memory_used_bytes{instance=~\".*:6380\"}",
+          "legendFormat": "stream-core Used"
+        }
+      ]
+    },
+    {
+      "id": 300,
+      "title": "Qdrant (Hippocampus / Vector Core)",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 26 },
+      "collapsed": false
+    },
+    {
+      "id": 17,
+      "title": "Qdrant Vector Count",
+      "description": "Total number of vectors stored across all Qdrant collections",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 27 },
+      "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "blue", "value": null }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "orientation": "auto",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(qdrant_vectors_count)",
+          "legendFormat": "Vectors",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "title": "Qdrant Collections",
+      "description": "Number of vector collections",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 27 },
+      "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "purple", "value": null }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "orientation": "auto",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count(qdrant_vectors_count)",
+          "legendFormat": "Collections",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "title": "Qdrant Search Latency (p95)",
+      "description": "95th percentile latency for vector similarity searches",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 27 },
+      "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 3,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.05 },
+              { "color": "orange", "value": 0.1 },
+              { "color": "red", "value": 0.5 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "orientation": "auto",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum(rate(qdrant_search_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "title": "Qdrant Grpc Requests / sec",
+      "description": "Rate of gRPC requests to Qdrant vector core",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 27 },
+      "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 100 },
+              { "color": "red", "value": 500 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "orientation": "auto",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(qdrant_grpc_requests_total[5m]))",
+          "legendFormat": "req/s",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "title": "Qdrant Vectors Over Time",
+      "description": "Growth of vector count across collections",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 31 },
+      "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "gradientMode": "scheme",
+            "showPoints": "never",
+            "thresholdsStyle": { "mode": "off" }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean", "last"] }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "qdrant_vectors_count",
+          "legendFormat": "{{ collection }}"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "title": "Disk I/O — All Storage Tiers",
+      "description": "Aggregate disk read/write bytes per second across storage services",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 31 },
+      "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "gradientMode": "scheme",
+            "showPoints": "never",
+            "thresholdsStyle": { "mode": "off" }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byRegexp", "options": ".*Read.*" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byRegexp", "options": ".*Write.*" },
+            "properties": [
+              { "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } },
+              { "id": "custom.transform", "value": "negative-Y" }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["mean", "max"] }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(node_disk_read_bytes_total{device=~\"sd.*|nvme.*\"}[5m]))",
+          "legendFormat": "Disk Read"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(node_disk_written_bytes_total{device=~\"sd.*|nvme.*\"}[5m]))",
+          "legendFormat": "Disk Write"
+        }
+      ]
+    }
+  ]
+}

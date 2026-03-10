@@ -7,6 +7,8 @@ __pycache__/
 dist/
 build/
 .eggs/
+.mypy_cache/
+.ruff_cache/
 
 # Virtual environment
 venv/
@@ -22,10 +24,18 @@ env/
 # Environment
 .env
 .env.local
+.env.production
 
 # Data (persistent volumes)
 data/
+
+# Test / Build output
+output/
 *.jsonl
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
 
 # OS
 .DS_Store
@@ -42,6 +52,24 @@ logs/
 node_modules/
 sdk/dist/
 sdk/node_modules/
-dashboard/node_modules/
-dashboard/.next/
 *.tsbuildinfo
+
+# TLS certificates (generated, never commit)
+certs/
+
+# Previous secrets (rotation backup)
+.env.previous
+.env.backup.*
+.env.prod
+
+# Staging environment
+.env.staging
+
+# Dashboard build artifacts
+dashboard/.next/
+dashboard/node_modules/
+dashboard/.env.local
+
+# Claude Code
+.claude/
+dashboard/.claude/

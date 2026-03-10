@@ -1,0 +1,498 @@
+{
+  "uid": "cortexdb-agents",
+  "title": "CortexDB / Agent Monitoring",
+  "description": "Agent workforce metrics: states, tasks, LLM usage, tool execution, and memory",
+  "tags": ["cortexdb", "agents"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "15s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "fiscalYearStartMonth": 0,
+  "liveNow": false,
+  "style": "dark",
+  "editable": true,
+  "graphTooltip": 1,
+  "templating": {
+    "list": [
+      {
+        "name": "department",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+        "query": "label_values(cortexdb_agent_state, department)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": { "selected": true, "text": "All", "value": "$__all" }
+      },
+      {
+        "name": "tier",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+        "query": "label_values(cortexdb_agent_state, tier)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": { "selected": true, "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Agents by State",
+      "description": "Current count of agents in each lifecycle state",
+      "type": "piechart",
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "hideFrom": { "tooltip": false, "viz": false, "legend": false } }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "active" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "working" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "blue", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "idle" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "semi-dark-yellow", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "suspended" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "quarantined" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "dark-red", "mode": "fixed" } }]
+          }
+        ]
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "pieType": "donut",
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "table", "placement": "right", "values": ["value", "percent"] }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (state) (cortexdb_agent_state{department=~\"$department\",tier=~\"$tier\"})",
+          "legendFormat": "{{ state }}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Total Active Agents",
+      "description": "Number of agents currently in the active state",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 3, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "orientation": "auto",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(cortexdb_agent_state{state=\"active\",department=~\"$department\",tier=~\"$tier\"})",
+          "legendFormat": "Active",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Working Agents",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 3, "x": 9, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "blue", "value": null }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "orientation": "auto",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(cortexdb_agent_state{state=\"working\",department=~\"$department\",tier=~\"$tier\"})",
+          "legendFormat": "Working",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Idle Agents",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 3, "x": 6, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "semi-dark-yellow", "value": null }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "orientation": "auto",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(cortexdb_agent_state{state=\"idle\",department=~\"$department\",tier=~\"$tier\"})",
+          "legendFormat": "Idle",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Suspended / Quarantined",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 3, "x": 9, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "orientation": "auto",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(cortexdb_agent_state{state=~\"suspended|quarantined\",department=~\"$department\",tier=~\"$tier\"})",
+          "legendFormat": "Problem",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Tasks per Minute",
+      "description": "Rate of task completions aggregated across all agents",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "opm",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 20,
+            "gradientMode": "scheme",
+            "showPoints": "never",
+            "thresholdsStyle": { "mode": "off" }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["mean", "max"] }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(cortexdb_tasks_completed_total{department=~\"$department\"}[5m])) * 60",
+          "legendFormat": "Completed"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(cortexdb_tasks_started_total{department=~\"$department\"}[5m])) * 60",
+          "legendFormat": "Started"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "title": "Task Success vs Failure Rate",
+      "description": "Proportion of tasks succeeding vs failing over time",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1,
+          "min": 0,
+          "max": 1,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "gradientMode": "scheme",
+            "showPoints": "never",
+            "thresholdsStyle": { "mode": "off" }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Success Rate" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Failure Rate" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }]
+          }
+        ]
+      },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["mean", "last"] }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(cortexdb_tasks_completed_total{status=\"success\",department=~\"$department\"}[5m])) / sum(rate(cortexdb_tasks_completed_total{department=~\"$department\"}[5m]))",
+          "legendFormat": "Success Rate"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(cortexdb_tasks_completed_total{status=\"failure\",department=~\"$department\"}[5m])) / sum(rate(cortexdb_tasks_completed_total{department=~\"$department\"}[5m]))",
+          "legendFormat": "Failure Rate"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "title": "LLM Token Usage per Provider",
+      "description": "Token consumption rate broken down by LLM provider (Anthropic, OpenAI, Ollama, Google)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 0,
+            "fillOpacity": 80,
+            "gradientMode": "scheme",
+            "showPoints": "never",
+            "stacking": { "mode": "normal", "group": "A" },
+            "thresholdsStyle": { "mode": "off" }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "anthropic" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "#d4a259", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "openai" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "#10a37f", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "ollama" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "#7c3aed", "mode": "fixed" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "google" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "#4285f4", "mode": "fixed" } }]
+          }
+        ]
+      },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["sum", "mean"] }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (provider) (rate(cortexdb_llm_tokens_total{department=~\"$department\"}[5m]))",
+          "legendFormat": "{{ provider }}"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "title": "Agent Bus Messages",
+      "description": "Rate of messages flowing through the agent communication bus (neural signals, delegations, events)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "gradientMode": "scheme",
+            "showPoints": "never",
+            "thresholdsStyle": { "mode": "off" }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "list", "placement": "bottom", "calcs": ["mean", "max"] }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (type) (rate(cortexdb_agent_bus_messages_total[5m]))",
+          "legendFormat": "{{ type }}"
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "title": "Tool Execution Rate",
+      "description": "Rate of tool invocations by tool name, with success/error breakdown",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 0,
+            "fillOpacity": 70,
+            "gradientMode": "scheme",
+            "showPoints": "never",
+            "stacking": { "mode": "normal", "group": "A" },
+            "thresholdsStyle": { "mode": "off" }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["sum", "mean"] }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(10, sum by (tool) (rate(cortexdb_tool_executions_total{department=~\"$department\"}[5m])))",
+          "legendFormat": "{{ tool }}"
+        }
+      ]
+    },
+    {
+      "id": 30,
+      "title": "Memory Usage per Agent (Top 15)",
+      "description": "Working memory and long-term memory entries per agent",
+      "type": "bargauge",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "cortexdb-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 500 },
+              { "color": "orange", "value": 1000 },
+              { "color": "red", "value": 5000 }
+            ]
+          },
+          "custom": {
+            "fillOpacity": 80
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true,
+        "valueMode": "text",
+        "minVizWidth": 8,
+        "minVizHeight": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(15, cortexdb_agent_memory_entries{department=~\"$department\",tier=~\"$tier\"})",
+          "legendFormat": "{{ agent_id }}",
+          "instant": true
+        }
+      ]
+    }
+  ]
+}

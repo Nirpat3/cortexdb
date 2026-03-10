@@ -1,0 +1,315 @@
+# ============================================================
+# CortexDB - Production Override
+# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# (c) 2026 Nirlab Inc. All Rights Reserved.
+# ============================================================
+#
+# IMPORTANT: Before using this file in production:
+#   1. Generate TLS certificates: ./scripts/generate-certs.sh --dev (or --prod)
+#   2. Set all secrets in .env (no defaults are provided here)
+#   3. Review resource limits for your hardware
+#
+# ============================================================
+
+x-prod-common: &prod-common
+  restart: always
+  logging:
+    driver: json-file
+    options:
+      max-size: "50m"
+      max-file: "5"
+
+services:
+
+  # -------------------------------------------------------
+  # Nginx — TLS Termination & Reverse Proxy (entry point)
+  # -------------------------------------------------------
+  nginx:
+    <<: *prod-common
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    container_name: cortex-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./certs:/etc/nginx/ssl:ro
+      - certbot-webroot:/var/www/certbot:ro
+    depends_on:
+      cortex-router:
+        condition: service_healthy
+      cortex-dashboard:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://localhost:80/"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    networks:
+      - cortex-net
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 256M
+        reservations:
+          cpus: "0.25"
+          memory: 64M
+
+  # -------------------------------------------------------
+  # CortexDB Router — no direct port exposure in production
+  # -------------------------------------------------------
+  cortex-router:
+    <<: *prod-common
+    ports: !reset []
+    environment:
+      - CORTEX_MODE=production
+      - CORTEX_PORT=5400
+      - CORTEX_HEALTH_PORT=5401
+      - CORTEX_ADMIN_PORT=5402
+      - RELATIONAL_CORE_URL=postgresql://cortex:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@relational-core:5432/cortexdb
+      - MEMORY_CORE_URL=redis://memory-core:6379/0
+      - MEMORY_CORE_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
+      - VECTOR_CORE_URL=http://vector-core:6333
+      - TEMPORAL_CORE_URL=postgresql://cortex:${POSTGRES_PASSWORD}@relational-core:5432/cortexdb
+      - GRAPH_CORE_URL=postgresql://cortex:${POSTGRES_PASSWORD}@relational-core:5432/cortexdb
+      - STREAM_CORE_URL=redis://stream-core:6380/0
+      - STREAM_CORE_PASSWORD=${STREAM_PASSWORD:?STREAM_PASSWORD must be set}
+      - IMMUTABLE_CORE_PATH=/data/immutable
+      - CORTEX_SECRET_KEY=${CORTEX_SECRET_KEY:?CORTEX_SECRET_KEY must be set (min 64 chars)}
+      - CORTEX_ADMIN_TOKEN=${CORTEX_ADMIN_TOKEN:?CORTEX_ADMIN_TOKEN must be set}
+      - CORTEX_CORS_ORIGINS=${CORTEX_CORS_ORIGINS:-https://localhost}
+      - CORTEX_ENABLE_AMYGDALA=true
+      - CORTEX_ENABLE_PLASTICITY=true
+      - CORTEX_ENABLE_SLEEP_CYCLE=true
+      - CORTEX_SLEEP_CYCLE_HOUR=2
+      - CORTEXDB_DATA_DIR=/data/superadmin
+      - CORTEXDB_MASTER_SECRET=${CORTEXDB_MASTER_SECRET:?CORTEXDB_MASTER_SECRET must be set}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 4G
+        reservations:
+          cpus: "1.0"
+          memory: 1G
+
+  # -------------------------------------------------------
+  # Relational Core — no direct port exposure
+  # -------------------------------------------------------
+  relational-core:
+    <<: *prod-common
+    ports: !reset []
+    environment:
+      - POSTGRES_USER=cortex
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      - POSTGRES_DB=cortexdb
+      - POSTGRES_SHARED_BUFFERS=1GB
+      - POSTGRES_EFFECTIVE_CACHE_SIZE=3GB
+      - POSTGRES_WORK_MEM=64MB
+      - POSTGRES_MAINTENANCE_WORK_MEM=512MB
+      - POSTGRES_WAL_BUFFERS=64MB
+      - POSTGRES_MAX_CONNECTIONS=500
+      - POSTGRES_MAX_WAL_SENDERS=10
+      - POSTGRES_WAL_LEVEL=logical
+    volumes:
+      - cortex-pg-data:/var/lib/postgresql/data
+      - cortex-backups:/backups
+      - ./db/migrations/001_schema.sql:/docker-entrypoint-initdb.d/01-init.sql
+      - ./db/migrations/002_sharding.sql:/docker-entrypoint-initdb.d/02-sharding.sql
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 6G
+        reservations:
+          cpus: "2.0"
+          memory: 2G
+
+  # -------------------------------------------------------
+  # Citus Workers — no direct port exposure
+  # -------------------------------------------------------
+  citus-worker-1:
+    <<: *prod-common
+    environment:
+      - POSTGRES_USER=cortex
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      - POSTGRES_DB=cortexdb
+      - POSTGRES_SHARED_BUFFERS=512MB
+      - POSTGRES_EFFECTIVE_CACHE_SIZE=1536MB
+      - POSTGRES_WORK_MEM=32MB
+      - POSTGRES_MAX_CONNECTIONS=300
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 3G
+        reservations:
+          cpus: "1.0"
+          memory: 1G
+
+  citus-worker-2:
+    <<: *prod-common
+    environment:
+      - POSTGRES_USER=cortex
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      - POSTGRES_DB=cortexdb
+      - POSTGRES_SHARED_BUFFERS=512MB
+      - POSTGRES_EFFECTIVE_CACHE_SIZE=1536MB
+      - POSTGRES_WORK_MEM=32MB
+      - POSTGRES_MAX_CONNECTIONS=300
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 3G
+        reservations:
+          cpus: "1.0"
+          memory: 1G
+
+  # -------------------------------------------------------
+  # Memory Core — no direct port exposure
+  # -------------------------------------------------------
+  memory-core:
+    <<: *prod-common
+    ports: !reset []
+    command: >
+      redis-server
+      --maxmemory 1gb
+      --maxmemory-policy allkeys-lru
+      --appendonly yes
+      --appendfsync everysec
+      --save 60 1000
+      --save 300 100
+      --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1536M
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  # -------------------------------------------------------
+  # Stream Core — no direct port exposure
+  # -------------------------------------------------------
+  stream-core:
+    <<: *prod-common
+    ports: !reset []
+    command: >
+      redis-server
+      --port 6380
+      --maxmemory 512mb
+      --maxmemory-policy noeviction
+      --appendonly yes
+      --appendfsync everysec
+      --requirepass ${STREAM_PASSWORD:?STREAM_PASSWORD must be set}
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+  # -------------------------------------------------------
+  # Vector Core — no direct port exposure
+  # -------------------------------------------------------
+  vector-core:
+    <<: *prod-common
+    ports: !reset []
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  # -------------------------------------------------------
+  # Dashboard — no direct port exposure, API URL injected at build
+  # -------------------------------------------------------
+  cortex-dashboard:
+    <<: *prod-common
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: https://${CORTEX_DOMAIN:-localhost}
+    ports: !reset []
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+
+  # -------------------------------------------------------
+  # Observability — always enabled in production
+  # -------------------------------------------------------
+  otel-collector:
+    <<: *prod-common
+    profiles: []
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+  prometheus:
+    <<: *prod-common
+    profiles: []
+    ports: !reset []
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+
+  loki:
+    <<: *prod-common
+    profiles: []
+    ports: !reset []
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+  tempo:
+    <<: *prod-common
+    profiles: []
+    ports: !reset []
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+  grafana:
+    <<: *prod-common
+    profiles: []
+    ports: !reset []
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:?GRAFANA_PASSWORD must be set}
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      - GF_SERVER_ROOT_URL=https://${CORTEX_DOMAIN:-localhost}/grafana/
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+
+volumes:
+  cortex-backups:
+  certbot-webroot:
