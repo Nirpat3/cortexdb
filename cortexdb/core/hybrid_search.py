@@ -139,22 +139,17 @@ class HybridSearch:
         try:
             pool = self.engines["relational"].pool
 
-            # Convert query to tsquery (simple: split words with &)
-            # Clean the query for tsquery safety
-            words = re.findall(r'\w+', query.lower())
-            if not words:
-                return []
-            tsquery = " & ".join(words[:20])  # Cap at 20 terms
-
+            # Use plainto_tsquery for safe query parsing — handles special
+            # characters, operators, and multi-word phrases without syntax errors.
             # Build query with optional tenant filter
             sql = """
                 SELECT chunk_id, content, doc_id, chunk_index, metadata,
                        ts_rank_cd(to_tsvector('english', content),
-                                  to_tsquery('english', $1)) AS rank
+                                  plainto_tsquery('english', $1)) AS rank
                 FROM rag_chunks
-                WHERE to_tsvector('english', content) @@ to_tsquery('english', $1)
+                WHERE to_tsvector('english', content) @@ plainto_tsquery('english', $1)
             """
-            params = [tsquery]
+            params = [query[:500]]  # Cap raw query length for safety
 
             if tenant_id:
                 sql += " AND tenant_id = $2"

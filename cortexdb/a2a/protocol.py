@@ -100,10 +100,19 @@ class A2AProtocol:
         self._redis = redis   # aioredis client (or None for standalone mode)
         self._pool = pool     # asyncpg pool (or None for standalone mode)
         self._tasks: Dict[str, A2ATask] = {}
+        self._MAX_CACHED_TASKS = 5000  # bounded in-memory task cache
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _cache_task(self, task: A2ATask):
+        """Add task to in-memory cache, evicting oldest if over limit."""
+        if len(self._tasks) >= self._MAX_CACHED_TASKS:
+            # Evict the oldest task by created_at
+            oldest_id = min(self._tasks, key=lambda k: self._tasks[k].created_at)
+            del self._tasks[oldest_id]
+        self._tasks[task.task_id] = task
 
     async def _pg_insert_task(self, task: A2ATask):
         """INSERT task into PostgreSQL a2a_tasks table."""
@@ -209,11 +218,11 @@ class A2AProtocol:
             return task
         task = await self._redis_get_task(task_id)
         if task:
-            self._tasks[task_id] = task
+            self._cache_task(task)
             return task
         task = await self._pg_get_task(task_id)
         if task:
-            self._tasks[task_id] = task
+            self._cache_task(task)
             await self._redis_set_task(task)
             return task
         return None
@@ -235,7 +244,7 @@ class A2AProtocol:
             priority=priority,
             tenant_id=tenant_id,
         )
-        self._tasks[task.task_id] = task
+        self._cache_task(task)
 
         # Persist to PG and cache in Redis
         await self._pg_insert_task(task)

@@ -82,6 +82,9 @@ class ChunkingPipeline:
         idx = 0
         chunk_index = 0
 
+        # Pre-compute word offsets once — O(n) instead of O(n²) per chunk
+        self._word_offsets = self._build_word_offsets(text, words)
+
         while idx < len(words):
             end = min(idx + target_words, len(words))
             # Enforce max_chunk_size
@@ -162,6 +165,7 @@ class ChunkingPipeline:
         cfg = self.config
         chunks: List[Chunk] = []
         chunk_index = 0
+        _search_pos = 0  # track position for finding sentence offsets
 
         current_sentences: List[str] = []
         current_tokens = 0
@@ -187,12 +191,15 @@ class ChunkingPipeline:
 
                 # Only emit if above minimum (or last chunk)
                 if token_count >= cfg.min_chunk_size or i == len(sentences) - 1:
-                    start_char = text.find(current_sentences[0], overlap_start if overlap_start == 0 else 0)
+                    # Use _search_pos to resume from where we last left off,
+                    # avoiding matching earlier duplicate sentences.
+                    start_char = text.find(current_sentences[0], _search_pos)
                     if start_char == -1:
-                        start_char = 0
+                        start_char = _search_pos
                     end_char = start_char + len(content)
                     if end_char > len(text):
                         end_char = len(text)
+                    _search_pos = start_char + 1
 
                     chunk_meta = dict(metadata) if metadata else {}
                     chunk_meta["strategy"] = "sentence"
@@ -348,16 +355,29 @@ class ChunkingPipeline:
         """Deterministic chunk ID from doc_id + index."""
         return hashlib.sha256(f"{doc_id}:{chunk_index}".encode()).hexdigest()[:16]
 
+    def _build_word_offsets(self, text: str, words: List[str]) -> List[int]:
+        """Pre-compute character offsets for all words in one pass — O(n)."""
+        offsets = []
+        pos = 0
+        for word in words:
+            idx = text.find(word, pos)
+            if idx == -1:
+                offsets.append(pos)
+            else:
+                offsets.append(idx)
+                pos = idx + len(word)
+        return offsets
+
     def _find_word_offset(self, text: str, words: List[str], word_index: int) -> int:
-        """Find the character offset of the Nth word in the original text."""
+        """Find the character offset of the Nth word in the original text.
+
+        Uses pre-computed offsets if available (set by callers via
+        ``_word_offsets``), otherwise falls back to a single-pass build.
+        """
         if word_index >= len(words):
             return len(text)
-        # Walk through text to find word positions
-        pos = 0
-        for i in range(word_index):
-            idx = text.find(words[i], pos)
-            if idx == -1:
-                return pos
-            pos = idx + len(words[i])
-        idx = text.find(words[word_index], pos)
-        return idx if idx != -1 else pos
+        if not hasattr(self, '_word_offsets') or self._word_offsets is None:
+            self._word_offsets = self._build_word_offsets(text, words)
+        if word_index < len(self._word_offsets):
+            return self._word_offsets[word_index]
+        return len(text)

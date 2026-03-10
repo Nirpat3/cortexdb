@@ -291,19 +291,26 @@ class ReadCascade:
         if self.audit and result.data is not None:
             try:
                 from cortexdb.compliance.audit import AuditEventType
-                asyncio.ensure_future(self.audit.log(
-                    event_type=AuditEventType.DATA_READ,
-                    actor=tenant_id or "anonymous",
-                    resource=query[:200],
-                    action="read",
-                    outcome="success",
-                    tenant_id=tenant_id,
-                    details={
-                        "tier_served": result.tier_served.value,
-                        "cache_hit": result.cache_hit,
-                        "engines_hit": result.engines_hit,
-                    },
-                ))
+
+                async def _audit_log():
+                    try:
+                        await self.audit.log(
+                            event_type=AuditEventType.DATA_READ,
+                            actor=tenant_id or "anonymous",
+                            resource=query[:200],
+                            action="read",
+                            outcome="success",
+                            tenant_id=tenant_id,
+                            details={
+                                "tier_served": result.tier_served.value,
+                                "cache_hit": result.cache_hit,
+                                "engines_hit": result.engines_hit,
+                            },
+                        )
+                    except Exception as exc:
+                        logger.warning(f"Audit logging failed: {exc}")
+
+                asyncio.create_task(_audit_log())
             except Exception as e:
                 logger.warning(f"Audit logging error on read: {e}")
 

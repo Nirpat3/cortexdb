@@ -372,16 +372,30 @@ async def health_metrics():
 
 # -- Admin Endpoints --
 
+def _require_admin(request):
+    """Check X-Tenant-ID header for admin access on internal endpoints."""
+    tid = request.headers.get("X-Tenant-ID", "")
+    if tid != "__admin__":
+        from starlette.responses import JSONResponse
+        return JSONResponse({"error": "admin access required"}, status_code=403)
+    return None
+
 @app.get("/admin/cache/stats")
-async def cache_stats():
+async def cache_stats(request: Request):
+    denied = _require_admin(request)
+    if denied: return denied
     return db.read_cascade.stats if db and db.read_cascade else {}
 
 @app.get("/admin/plasticity/top-paths")
-async def top_paths():
+async def top_paths(request: Request):
+    denied = _require_admin(request)
+    if denied: return denied
     return db.plasticity.top_paths if db else []
 
 @app.get("/admin/engines")
-async def engine_list():
+async def engine_list(request: Request):
+    denied = _require_admin(request)
+    if denied: return denied
     if not db: return {"engines": {}}
     result = {}
     for name, engine in db.engines.items():
@@ -390,7 +404,9 @@ async def engine_list():
     return {"engines": result}
 
 @app.post("/admin/plasticity/decay")
-async def trigger_decay():
+async def trigger_decay(request: Request):
+    denied = _require_admin(request)
+    if denied: return denied
     if db: db.plasticity.decay()
     return {"status": "decay_triggered"}
 
@@ -1082,12 +1098,23 @@ async def rag_hybrid_search(request: Request, body: dict):
 
 
 # ── Benchmark Endpoints ──
+# Lazy imports to avoid loading heavy benchmark deps at startup
+_bench_runner = None
+_stress_engine = None
 
-from cortexdb.benchmark.runner import BenchmarkRunner
-from cortexdb.benchmark.stress import StressTestEngine, StressConfig, StressPattern
+def _get_bench_runner():
+    global _bench_runner
+    if _bench_runner is None:
+        from cortexdb.benchmark.runner import BenchmarkRunner
+        _bench_runner = BenchmarkRunner()
+    return _bench_runner
 
-_bench_runner = BenchmarkRunner()
-_stress_engine = StressTestEngine()
+def _get_stress_engine():
+    global _stress_engine
+    if _stress_engine is None:
+        from cortexdb.benchmark.stress import StressTestEngine
+        _stress_engine = StressTestEngine()
+    return _stress_engine
 
 
 @app.post("/v1/admin/benchmark/run")
@@ -1104,13 +1131,13 @@ async def run_benchmark(
         s["concurrency"] = concurrency
         if suite == "quick":
             s["iterations"] = min(iterations, 500)
-    return await _bench_runner.run_suite(scenarios, concurrency=concurrency)
+    return await _get_bench_runner().run_suite(scenarios, concurrency=concurrency)
 
 
 @app.get("/v1/admin/benchmark/results")
 async def benchmark_results():
     """Get results from the last benchmark run."""
-    return _bench_runner.get_results()
+    return _get_bench_runner().get_results()
 
 
 @app.post("/v1/admin/benchmark/stress")
@@ -1121,7 +1148,8 @@ async def run_stress_test(
     peak_rps: int = 500,
 ):
     """Run a stress test pattern (spike/soak/ramp/burst/mixed)."""
-    if _stress_engine.is_running():
+    stress = _get_stress_engine()
+    if stress.is_running():
         return {"error": "Stress test already running"}
     valid_patterns = {"spike", "soak", "ramp", "burst", "mixed"}
     if pattern not in valid_patterns:
@@ -1130,6 +1158,7 @@ async def run_stress_test(
     base_rps = max(1, min(base_rps, 5000))
     peak_rps = max(base_rps, min(peak_rps, 10000))
 
+    from cortexdb.benchmark.stress import StressConfig, StressPattern
     config = StressConfig(
         pattern=StressPattern(pattern),
         duration_sec=duration_sec,
@@ -1147,7 +1176,7 @@ async def run_stress_test(
             await db.query("SELECT 1", tenant_id="__benchmark__")
         return {"ok": True}
 
-    result = await _stress_engine.run(config, _read, _write)
+    result = await stress.run(config, _read, _write)
     return result.to_dict()
 
 
@@ -1239,8 +1268,8 @@ async def rag_delete(doc_id: str, request: Request):
 @app.post("/v1/admin/benchmark/stop")
 async def stop_benchmark():
     """Stop any running benchmark or stress test."""
-    _bench_runner.stop()
-    _stress_engine.stop()
+    if _bench_runner: _bench_runner.stop()
+    if _stress_engine: _stress_engine.stop()
     return {"stopped": True}
 
 

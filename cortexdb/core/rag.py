@@ -63,6 +63,9 @@ class RAGPipeline:
         # 1. Chunk the document
         chunks = self.chunking.chunk(text, doc_id, metadata)
 
+        # 1.5. Delete existing chunks to prevent orphan vectors on re-ingest
+        await self.delete_document(doc_id, collection, tenant_id)
+
         # 2. Store document metadata in PG
         if "relational" in self.engines:
             pool = self.engines["relational"].pool

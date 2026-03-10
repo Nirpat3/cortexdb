@@ -81,16 +81,26 @@ class VectorEngine(BaseEngine):
         }
 
     async def _ensure_collection(self, collection: str):
-        """Create collection if it doesn't exist."""
+        """Create collection if it doesn't exist.
+
+        Uses a local cache but verifies with Qdrant on miss to handle
+        multi-instance deployments where another process may have created it.
+        """
         if collection in self._collections_created:
             return
         try:
+            # Check if it actually exists in Qdrant (handles multi-instance)
+            existing = await self.client.get_collections()
+            existing_names = {c.name for c in existing.collections}
+            self._collections_created.update(existing_names)
+            if collection in existing_names:
+                return
             await self.client.create_collection(
                 collection,
                 vectors_config=VectorParams(size=VECTOR_DIM, distance=Distance.COSINE)
             )
         except Exception:
-            pass  # May already exist from another process
+            pass  # May already exist from a concurrent create
         self._collections_created.add(collection)
 
     async def search_similar(self, collection: str, query_text: str,
@@ -180,6 +190,8 @@ class VectorEngine(BaseEngine):
 
     async def write(self, data_type: str, payload: Dict, actor: str = "system") -> Any:
         """Write handler for WriteFanOut integration."""
+        # Work on a copy to avoid mutating the caller's dict
+        payload = dict(payload)
         collection = payload.pop("_collection", "default")
         text = payload.pop("_text", None)
         vector = payload.pop("_vector", None)

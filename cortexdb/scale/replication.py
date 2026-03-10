@@ -156,9 +156,12 @@ class ReplicaRouter:
             del self._recent_writers[tenant_id]
         return False
 
-    def route(self, query: str, tenant_id: Optional[str] = None,
-              force: Optional[ReadWriteSplit] = None) -> ReplicaNode:
-        """Route query to appropriate node."""
+    async def route(self, query: str, tenant_id: Optional[str] = None,
+                    force: Optional[ReadWriteSplit] = None) -> ReplicaNode:
+        """Route query to appropriate node.
+
+        This is async because read-your-writes checks may hit Redis.
+        """
         self._query_count += 1
 
         # Periodic cleanup of expired writer entries (every 30s)
@@ -175,25 +178,14 @@ class ReplicaRouter:
         if any(query_upper.startswith(kw) for kw in
                ("INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP",
                 "TRUNCATE", "GRANT", "REVOKE", "SET")):
-            if tenant_id:
-                # Enforce bounded size — evict oldest if at capacity
-                if len(self._recent_writers) >= self.MAX_RECENT_WRITERS:
-                    self._cleanup_recent_writers(now)
-                    if len(self._recent_writers) >= self.MAX_RECENT_WRITERS:
-                        # Still full — evict oldest entry
-                        oldest = min(self._recent_writers, key=self._recent_writers.get)
-                        del self._recent_writers[oldest]
-                self._recent_writers[tenant_id] = now
+            await self.record_write(tenant_id) if tenant_id else None
             self._read_from_primary += 1
             return self._primary
 
-        # Read-your-writes: route to primary if tenant just wrote
-        if tenant_id and tenant_id in self._recent_writers:
-            if now - self._recent_writers[tenant_id] < self.WRITER_STICKY_SEC:
-                self._read_from_primary += 1
-                return self._primary
-            else:
-                del self._recent_writers[tenant_id]
+        # Read-your-writes: check Redis first, then in-memory fallback
+        if tenant_id and await self.should_route_to_primary(tenant_id):
+            self._read_from_primary += 1
+            return self._primary
 
         # Select replica
         if force == ReadWriteSplit.NEAREST:
@@ -223,8 +215,11 @@ class ReplicaRouter:
         if not healthy:
             return self._primary
 
-        self._round_robin_idx = (self._round_robin_idx + 1) % len(healthy)
-        return healthy[self._round_robin_idx]
+        # Modulo first, then increment — ensures we always pick a valid index
+        # even when the healthy list size changes between calls.
+        idx = self._round_robin_idx % len(healthy)
+        self._round_robin_idx = idx + 1
+        return healthy[idx]
 
     def _nearest_replica(self) -> ReplicaNode:
         """Select replica with lowest latency."""
