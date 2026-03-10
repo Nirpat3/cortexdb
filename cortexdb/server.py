@@ -653,7 +653,7 @@ async def a2a_create_task(req: A2ATaskRequest, request: Request):
 @app.get("/v1/a2a/tasks")
 async def a2a_list_tasks(request: Request, agent_id: Optional[str] = None,
                          status: Optional[str] = None):
-    return {"tasks": a2a_protocol.list_tasks(
+    return {"tasks": await a2a_protocol.list_tasks(
         agent_id=agent_id, status=status,
         tenant_id=_tenant_id(request))}
 
