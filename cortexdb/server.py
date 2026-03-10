@@ -1141,7 +1141,7 @@ async def rag_ingest(request: Request, body: dict):
 
 @app.post("/v1/rag/retrieve")
 async def rag_retrieve(request: Request, body: dict):
-    """Retrieve relevant chunks for a query."""
+    """Retrieve relevant chunks for a query (basic or smart mode)."""
     if not db or not db.rag:
         raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
     tid = _tenant_id(request)
@@ -1150,7 +1150,41 @@ async def rag_retrieve(request: Request, body: dict):
         collection=body.get("collection", "documents"),
         limit=body.get("limit", 5),
         max_tokens=body.get("max_tokens", 4000),
-        tenant_id=tid)
+        tenant_id=tid,
+        smart=body.get("smart", False))
+    return result
+
+
+@app.post("/v1/rag/smart-retrieve")
+async def rag_smart_retrieve(request: Request, body: dict):
+    """Intelligent RAG retrieval with query understanding, feedback loop, and grounding.
+
+    Analyzes query intent, generates multi-query variants, scores confidence,
+    auto-reformulates on low confidence, and verifies answer grounding.
+    """
+    if not db or not db.rag:
+        raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
+    tid = _tenant_id(request)
+    result = await db.rag.smart_retrieve(
+        query=body["query"],
+        collection=body.get("collection", "documents"),
+        limit=body.get("limit", 5),
+        threshold=body.get("threshold", 0.75),
+        tenant_id=tid,
+        use_feedback_loop=body.get("feedback_loop", True))
+    return result
+
+
+@app.post("/v1/rag/ingest/hierarchical")
+async def rag_ingest_hierarchical(request: Request, body: dict):
+    """Ingest with parent-child chunking for precision + rich context."""
+    if not db or not db.rag:
+        raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
+    tid = _tenant_id(request)
+    result = await db.rag.ingest_hierarchical(
+        text=body["text"], doc_id=body["doc_id"],
+        collection=body.get("collection", "documents"),
+        metadata=body.get("metadata"), tenant_id=tid)
     return result
 
 

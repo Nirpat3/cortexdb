@@ -19,6 +19,7 @@ Tools:
   cortexdb.memory.share  - Share a memory with other agents
   cortexdb.rag.ingest    - Ingest a document for RAG
   cortexdb.rag.retrieve  - Retrieve relevant context for a query
+  cortexdb.rag.smart_retrieve - Intelligent retrieval with query understanding + feedback loop
 """
 
 import json
@@ -223,7 +224,26 @@ class CortexMCPServer:
                                   "description": "Max chunks to return (1-50)"},
                         "max_tokens": {"type": "integer", "default": 4000,
                                        "description": "Maximum tokens in the context window"},
+                        "smart": {"type": "boolean", "default": False,
+                                  "description": "Enable intelligent retrieval with query understanding and feedback loop"},
                         "tenant_id": {"type": "string", "description": "Tenant ID for isolation"},
+                    },
+                    "required": ["query"],
+                }),
+            "cortexdb.rag.smart_retrieve": MCPToolDefinition(
+                name="cortexdb.rag.smart_retrieve",
+                description="Intelligent RAG retrieval. Analyzes query intent, generates multi-query variants, scores retrieval confidence, auto-reformulates on low confidence, verifies answer grounding, and returns citations.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Natural-language query"},
+                        "collection": {"type": "string", "default": "documents"},
+                        "limit": {"type": "integer", "default": 5},
+                        "threshold": {"type": "number", "default": 0.75,
+                                      "description": "Minimum similarity threshold"},
+                        "feedback_loop": {"type": "boolean", "default": True,
+                                          "description": "Auto-reformulate when confidence is low"},
+                        "tenant_id": {"type": "string"},
                     },
                     "required": ["query"],
                 }),
@@ -399,6 +419,21 @@ class CortexMCPServer:
                     limit=int(args.get("limit", 5)),
                     max_tokens=int(args.get("max_tokens", 4000)),
                     tenant_id=args.get("tenant_id"),
+                    smart=bool(args.get("smart", False)),
+                )
+                return MCPToolResult(content=result)
+
+            elif tool_name == "cortexdb.rag.smart_retrieve":
+                if not self.db.rag:
+                    return MCPToolResult(is_error=True,
+                                        error_message="RAG pipeline not initialized")
+                result = await self.db.rag.smart_retrieve(
+                    query=args["query"],
+                    collection=args.get("collection", "documents"),
+                    limit=int(args.get("limit", 5)),
+                    threshold=float(args.get("threshold", 0.75)),
+                    tenant_id=args.get("tenant_id"),
+                    use_feedback_loop=bool(args.get("feedback_loop", True)),
                 )
                 return MCPToolResult(content=result)
 

@@ -902,6 +902,12 @@ class CortexDB:
             "sleep_cycle": self.sleep_cycle.get_status() if self.sleep_cycle else {},
             "agent_memory": self.agent_memory.get_info() if self.agent_memory else {"status": "not_loaded"},
             "rag_pipeline": self.rag.get_stats() if self.rag else {"status": "not_loaded"},
+            "rag_intelligence": {
+                "query_understanding": bool(self.rag and self.rag.query_understanding),
+                "retrieval_feedback": bool(self.rag and self.rag.retrieval_feedback),
+                "answer_grounding": bool(self.rag and self.rag.answer_grounding),
+                "hierarchical_chunking": bool(self.rag and self.rag.hierarchical_chunker),
+            } if self.rag else {"status": "not_loaded"},
             "hybrid_search": self.hybrid_search.get_stats() if self.hybrid_search else {"status": "not_loaded"},
             "outbox_worker": (await self.outbox_worker.get_metrics()) if self.outbox_worker else {"status": "not_loaded"},
             "encryption": self.field_encryption.get_stats() if self.field_encryption else {"status": "disabled"},
