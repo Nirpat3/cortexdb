@@ -44,6 +44,14 @@ class EmbeddingPipeline:
 
     def __init__(self):
         _load_model()
+        if not _model_available:
+            logger.warning(
+                "*** DEGRADED MODE: sentence-transformers not installed. "
+                "Semantic cache (R2), agent memory recall, embedding sync, and "
+                "A2A agent discovery will NOT work correctly. Hash-based fallback "
+                "provides deterministic vectors but NO semantic similarity. "
+                "Install: pip install sentence-transformers ***"
+            )
 
     def embed(self, text: str) -> List[float]:
         """Embed a single text string."""

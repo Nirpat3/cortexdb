@@ -69,12 +69,12 @@ class VectorEngine(BaseEngine):
 
     async def health(self) -> Dict:
         collections = await self.client.get_collections()
-        model = _load_transformer()
+        pipeline = _get_pipeline()
         return {
             "engine": "Qdrant",
             "brain_region": "Hippocampus",
             "collections": len(collections.collections),
-            "embedding_mode": "sentence-transformers" if model and model is not False else "hash-fallback",
+            "embedding_mode": "sentence-transformers" if pipeline.is_ml_available else "hash-fallback",
             "vector_dim": VECTOR_DIM,
             "searches": self._search_count,
             "writes": self._write_count,

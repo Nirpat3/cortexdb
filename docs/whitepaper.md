@@ -1,23 +1,25 @@
 # CortexDB™ Technical White Paper
 
-**Version 4.0 — March 2026**
+**Version 6.1.0 — March 2026**
 **Nirlab Inc.**
 
 ---
 
 ## Abstract
 
-CortexDB is a consciousness-inspired unified database system that replaces seven specialized databases with a single platform. By mapping database components to brain regions — Neocortex for long-term storage, Hippocampus for pattern matching, Amygdala for security, Thalamus for routing — CortexDB achieves the functional breadth of a polyglot persistence stack with the operational simplicity of a single system.
+CortexDB is an AI Agent Data Infrastructure layer that coordinates PostgreSQL, Redis, and Qdrant through a unified API. It provides capabilities no single database or ORM offers: semantic caching (finding cached responses to semantically similar queries), automatic write fan-out with a transactional outbox pattern, embedding sync (automatic vector freshness), agent-to-agent discovery, agent memory with temporal decay, and MCP tool exposure for AI agents.
 
-Version 4.0 introduces petabyte-scale horizontal sharding via Citus, compliance certification for FedRAMP/SOC2/HIPAA/PCI-DSS/PA-DSS, AI-powered index management, and the CortexGraph™ customer intelligence platform.
+CortexDB sits **alongside** your existing databases — not as a replacement. The TypeScript SDK routes simple CRUD directly to PostgreSQL (zero overhead) and only sends cross-engine operations through the Python intelligence sidecar.
+
+Version 6.1.0 incorporates findings from a PhD expert panel evaluation (distributed systems, AI/ML, and security specialists) with all P0 security fixes, P1 production readiness enhancements, and the agent memory protocol implemented.
 
 ---
 
 ## 1. The Problem
 
-### 1.1 Database Sprawl
+### 1.1 AI Agents Need Multi-Modal Data Access
 
-Modern enterprise applications require multiple specialized databases:
+AI agents (LangGraph, CrewAI, OpenAI Agents, Claude) need to simultaneously query structured data (SQL), semantic data (vectors), relationship data (graphs), and event streams — often in a single reasoning step. Today, developers wire up 3-5 separate clients, manage connection pools for each, and handle cross-system consistency manually. The typical stack includes:
 
 | Need | Typical Solution | Annual Cost |
 |------|-----------------|-------------|

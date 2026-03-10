@@ -1,5 +1,5 @@
 """
-CortexDB Core - Intelligence Layer (v4.0)
+CortexDB Core - Intelligence Layer (v6.1)
 
 Cross-engine query routing, 5-tier read cascade with semantic caching,
 write fan-out with DLQ, and query path optimization.
@@ -239,10 +239,20 @@ class ReadCascade:
                     future: asyncio.Future = loop.create_future()
                     self._pending_queries[qhash] = future
                     try:
-                        # Set RLS context for tenant isolation
-                        if tenant_id and self.tenant_isolation:
-                            await self.tenant_isolation.set_rls_context(tenant_id)
-                        data = await self.engines["relational"].execute(query, params)
+                        # CRITICAL FIX: Execute SET LOCAL and query on the SAME
+                        # connection in the SAME transaction. Previously, set_rls_context()
+                        # acquired its own connection, so SET LOCAL was discarded before
+                        # the query ran on a different pooled connection.
+                        if tenant_id and self.tenant_isolation and \
+                                hasattr(self.engines["relational"], "pool"):
+                            pool = self.engines["relational"].pool
+                            async with pool.acquire() as conn:
+                                async with conn.transaction():
+                                    await self.tenant_isolation.set_rls_context(
+                                        tenant_id, conn=conn)
+                                    data = await conn.fetch(query, *(params or []))
+                        else:
+                            data = await self.engines["relational"].execute(query, params)
                         future.set_result(data)
                     except Exception as exc:
                         future.set_exception(exc)
@@ -651,7 +661,7 @@ class CortexDB:
         }
 
     async def connect(self):
-        logger.info("CortexDB v4.0 initializing...")
+        logger.info("CortexDB v6.1 initializing...")
 
         from cortexdb.engines.relational import RelationalEngine
         from cortexdb.engines.memory import MemoryEngine
@@ -852,7 +862,7 @@ class CortexDB:
 
     async def health(self) -> Dict:
         health = {
-            "status": "healthy", "version": "4.0.0",
+            "status": "healthy", "version": "6.1.0",
             "uptime_seconds": round(time.time() - self._start_time, 1),
             "queries_total": self._query_count,
             "engines": {},
