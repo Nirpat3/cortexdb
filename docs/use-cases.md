@@ -16,6 +16,9 @@
 8. [Gaming & Entertainment](#8-gaming--entertainment)
 9. [Logistics & Supply Chain](#9-logistics--supply-chain)
 10. [IoT & Industrial](#10-iot--industrial)
+11. [RAG with Auto-Fresh Vectors](#11-rag-with-auto-fresh-vectors)
+12. [Multi-Agent Memory Sharing](#12-multi-agent-memory-sharing)
+13. [HIPAA/PCI Compliant AI](#13-hipaapci-compliant-ai)
 
 ---
 
@@ -92,10 +95,11 @@ GET /v1/cortexgraph/attribution/CAMP-SUMMER-2026
 |---------|--------|-----------|
 | Orders & inventory | RelationalCore | PostgreSQL |
 | Session cache | MemoryCore | Redis |
-| Product search | VectorCore | Elasticsearch |
+| Product search | VectorCore (auto-synced via embedding pipeline) | Elasticsearch |
 | Customer graph | GraphCore | Custom code |
 | Purchase events | TemporalCore + StreamCore | Segment + TimescaleDB |
 | PCI audit trail | ImmutableCore | Custom ledger |
+| Write fan-out | Transactional outbox (crash-safe) | In-memory queue |
 
 ### ROI
 - **Infrastructure**: 7 systems → 1 ($180K/yr savings)
@@ -196,7 +200,7 @@ POST /v1/write
   "actor": "payment-service"
 }
 ```
-Sync write to RelationalCore + ImmutableCore (ACID). Async fan-out to TemporalCore (time-series) + StreamCore (real-time alerts) + MemoryCore (balance cache).
+Sync write to RelationalCore + ImmutableCore (ACID). Async fan-out via **transactional outbox** (PG-backed, crash-safe) to TemporalCore (time-series) + StreamCore (real-time alerts) + MemoryCore (balance cache). No payment event is ever lost — pending fan-outs survive process restarts.
 
 **PCI-DSS card data protection:**
 - PAN fields encrypted with AES-256-GCM
@@ -581,14 +585,163 @@ VectorCore finds equipment that exhibited similar sensor patterns before failure
 
 ---
 
+## 11. RAG with Auto-Fresh Vectors
+
+### The Challenge
+RAG (Retrieval-Augmented Generation) applications suffer from a silent failure mode: when source data changes in the primary database, the corresponding vector embeddings go stale. Users get semantically incorrect retrieval results with no error signal. Teams build fragile cron jobs to re-embed, but data drifts between runs.
+
+### CortexDB Solution
+
+**Automatic embedding sync — zero cron jobs:**
+
+CortexDB's embedding sync pipeline uses PostgreSQL `NOTIFY` to detect every data change and automatically re-embeds affected rows into Qdrant. The vector store always reflects the current relational state.
+
+```
+User updates product description in RelationalCore
+  → PG trigger fires NOTIFY cortexdb_embedding_sync
+  → Listener fetches updated row
+  → Unified embedding codepath re-embeds text
+  → Qdrant upsert with new vector
+  → Next semantic search returns fresh result
+```
+
+**Adaptive cache thresholds for RAG queries:**
+
+RAG retrieval queries use a cosine similarity threshold of 0.85 for semantic cache hits — lower than the 0.87 threshold for general NL queries — because RAG benefits from broader recall. SQL queries skip the semantic cache entirely (exact-match only).
+
+**Crash-safe pipeline:**
+
+The embedding sync is backed by the transactional outbox. If the process crashes mid-sync, pending re-embeddings are retried on restart. No vectors are silently lost.
+
+### Why It Matters
+- **Eliminates stale vectors**: The #1 reliability problem in production RAG systems
+- **Zero operational burden**: No cron jobs, no manual re-indexing, no "did we re-embed?"
+- **Consistent embeddings**: Same model for write-time indexing and query-time search
+
+---
+
+## 12. Multi-Agent Memory Sharing
+
+### The Challenge
+AI agent platforms run dozens of specialized agents that need persistent memory. An agent that researches a customer should remember findings for future conversations. Multiple agents working on the same account should share context. Current solutions use flat key-value stores with no decay, no sharing, and no semantic recall.
+
+### CortexDB Solution
+
+**Store a memory with importance scoring:**
+```bash
+POST /v1/mcp/call
+{
+  "tool": "cortexdb.memory.store",
+  "input": {
+    "agent_id": "research-agent-001",
+    "content": "Customer ACME-Corp is evaluating CortexDB for their healthcare division. Decision timeline: Q2 2026. Key concern: HIPAA compliance.",
+    "importance": 0.9,
+    "tags": ["acme-corp", "healthcare", "hipaa"]
+  }
+}
+```
+
+**Recall memories by semantic similarity:**
+```bash
+POST /v1/mcp/call
+{
+  "tool": "cortexdb.memory.recall",
+  "input": {
+    "agent_id": "research-agent-001",
+    "query": "What do we know about ACME's compliance requirements?",
+    "limit": 5
+  }
+}
+# Returns memories ranked by semantic similarity × current retention score
+```
+
+**Share memories across agents:**
+```bash
+POST /v1/mcp/call
+{
+  "tool": "cortexdb.memory.share",
+  "input": {
+    "source_agent_id": "research-agent-001",
+    "target_agent_id": "sales-agent-002",
+    "memory_id": "mem-abc-123"
+  }
+}
+# sales-agent-002 can now recall this memory with full provenance
+```
+
+**Ebbinghaus decay keeps memory clean:**
+
+Memories decay over time following `retention(t) = importance * e^(-lambda * t)`. High-importance memories (0.9) persist for weeks; low-importance observations (0.3) fade within days. Each recall resets the decay timer. The nightly Sleep Cycle garbage-collects memories below threshold.
+
+### Engines Used
+| Feature | Engine |
+|---------|--------|
+| Memory text + metadata | RelationalCore |
+| Semantic recall | VectorCore (auto-synced) |
+| Fast recent-memory lookup | MemoryCore (Redis) |
+| Memory audit trail | ImmutableCore |
+
+---
+
+## 13. HIPAA/PCI Compliant AI
+
+### The Challenge
+AI applications handling healthcare (PHI) or payment (PCI) data face a dilemma: they need semantic search and agent intelligence, but compliance frameworks require field-level encryption, audit trails, and access controls. Teams end up building compliance layers on top of 3-4 separate systems — or avoiding AI features entirely.
+
+### CortexDB Solution
+
+**Field-level AES-256-GCM encryption wired into read/write paths:**
+
+Sensitive fields are encrypted transparently. Agents interact with plaintext through authorized API calls; the encryption/decryption happens inside CortexDB's read and write codepaths — not in a separate middleware layer.
+
+```python
+# Write path: automatic encryption of CONFIDENTIAL/RESTRICTED fields
+POST /v1/write
+{
+  "data_type": "block",
+  "payload": {
+    "patient_name": "Jane Smith",      # → encrypted (CONFIDENTIAL)
+    "diagnosis": "Type 2 Diabetes",     # → encrypted (RESTRICTED/PHI)
+    "department": "Endocrinology"       # → plaintext (INTERNAL)
+  }
+}
+
+# Read path: automatic decryption for authorized callers
+# Unauthorized callers see encrypted blobs
+```
+
+**Immutable audit trail (PostgreSQL-backed ledger):**
+
+Every PHI access, every payment write, every encryption key rotation is logged to a PostgreSQL-backed immutable ledger with append-only triggers and SHA-256 hash chain. The ledger satisfies HIPAA 164.312(b) and PCI DSS Requirement 10.
+
+**RLS tenant isolation (SET LOCAL):**
+
+Row-Level Security uses `SET LOCAL` to scope tenant context to the current transaction. This prevents cross-tenant data leakage in connection-pooled environments — a P0 fix validated by expert review.
+
+**Compliance evidence generation:**
+```bash
+GET /v1/compliance/audit/hipaa
+GET /v1/compliance/audit/pci_dss
+# Auto-generated evidence reports with control mappings, event counts, and gap analysis
+```
+
+### Why It Matters
+- **AI + compliance in one system**: No separate encryption service, audit database, or access control layer
+- **Field-level granularity**: Encrypt only what's sensitive, leave the rest queryable
+- **Expert-validated**: Architecture reviewed by PhD specialist panel covering security and distributed systems
+
+---
+
 ## Cross-Cutting Capabilities
 
 ### Every Use Case Gets These for Free
 
 | Capability | Benefit |
 |-----------|---------|
-| **5-tier read cache** | 82% cache hit rate, sub-ms reads |
-| **Multi-tenant isolation** | RLS + encryption + key prefix |
+| **5-tier read cache** | 82% cache hit rate, sub-ms reads, adaptive thresholds per query type |
+| **Crash-safe writes** | Transactional outbox — async fan-outs survive restarts |
+| **Embedding sync** | PG NOTIFY auto-refreshes vectors when relational data changes |
+| **Multi-tenant isolation** | RLS (SET LOCAL) + encryption + key prefix |
 | **Rate limiting** | Plan-based, per-tenant, per-endpoint |
 | **Amygdala security** | SQL injection blocked in < 1ms |
 | **Immutable audit trail** | SHA-256 hash chain, 7-year retention |
