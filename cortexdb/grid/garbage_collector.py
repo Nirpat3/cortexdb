@@ -89,19 +89,98 @@ class GridGarbageCollector:
         return zombies_found
 
     async def cleanup_orphaned_links(self) -> int:
+        """Remove references to nodes that no longer exist in the state machine.
+
+        Orphaned links occur when a node is removed but other nodes still
+        reference it in their dependency lists or routing tables.
+        """
         orphaned = 0
+        known_ids = {n.node_id for n in self.state_machine.active_nodes}
+        all_nodes = list(self.state_machine._nodes.values())
+
+        for node in all_nodes:
+            # Clean dependency references to removed nodes
+            if hasattr(node, "dependencies"):
+                before = len(node.dependencies)
+                node.dependencies = [d for d in node.dependencies if d in known_ids]
+                removed = before - len(node.dependencies)
+                if removed > 0:
+                    orphaned += removed
+                    logger.info(f"GGC: Removed {removed} orphaned deps from {node.node_id}")
+
+            # Clean peer references
+            if hasattr(node, "peers"):
+                before = len(node.peers)
+                node.peers = [p for p in node.peers if p in known_ids]
+                orphaned += before - len(node.peers)
+
+        # Remove nodes stuck in TOMBSTONED state for > 1 hour
+        tombstoned = [n for n in all_nodes
+                      if n.state == NodeState.TOMBSTONED
+                      and n.time_since_heartbeat > 3600]
+        for node in tombstoned:
+            self.state_machine.transition(node.node_id, NodeState.PURGED,
+                                          "GGC tombstone expiry")
+            orphaned += 1
+            self.stats.tombstones_purged += 1
+
         self.stats.orphaned_links_removed += orphaned
+        if orphaned > 0:
+            logger.info(f"GGC: Cleaned {orphaned} orphaned links/tombstones")
         return orphaned
 
     async def purge_stale_routes(self) -> int:
+        """Remove routing entries for nodes that are DEAD, QUARANTINE, or PURGED.
+
+        Stale routes cause requests to be sent to unresponsive nodes,
+        increasing latency and error rates.
+        """
         purged = 0
+        stale_states = {NodeState.DEAD, NodeState.QUARANTINE,
+                        NodeState.PURGED, NodeState.REMOVED}
+
+        for node in list(self.state_machine._nodes.values()):
+            if node.state in stale_states:
+                # Node is in a terminal/bad state — mark for route removal
+                if hasattr(node, "route_active") and node.route_active:
+                    node.route_active = False
+                    purged += 1
+                    logger.info(f"GGC: Purged stale route for {node.node_id} "
+                                f"(state={node.state.value})")
+
+                # Nodes DEAD for > 10 minutes without recovery → quarantine
+                if (node.state == NodeState.DEAD and
+                        node.time_since_heartbeat > 600):
+                    try:
+                        self.state_machine.transition(
+                            node.node_id, NodeState.QUARANTINE,
+                            "GGC stale route purge - dead > 10m")
+                        purged += 1
+                    except Exception:
+                        pass
+
         self.stats.stale_routes_purged += purged
+        if purged > 0:
+            logger.info(f"GGC: Purged {purged} stale routes")
         return purged
 
     async def compact_topology(self) -> None:
+        """Compact topology by removing PURGED nodes and defragmenting state.
+
+        Also cleans up metrics for nodes that no longer exist.
+        """
+        all_nodes = list(self.state_machine._nodes.items())
+        removed = 0
+
+        for node_id, node in all_nodes:
+            if node.state == NodeState.PURGED:
+                del self.state_machine._nodes[node_id]
+                removed += 1
+
         active = self.state_machine.active_nodes
         self.stats.compactions_run += 1
-        logger.info(f"GGC: Topology compaction - {len(active)} active nodes")
+        logger.info(f"GGC: Topology compaction - {len(active)} active nodes, "
+                    f"{removed} purged nodes removed")
 
     def get_stats(self) -> Dict:
         return {

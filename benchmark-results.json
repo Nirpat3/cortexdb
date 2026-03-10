@@ -1,0 +1,80 @@
+{
+  "timestamp": "2026-03-06T17:02:39.221313",
+  "url": "http://cortex-router:5400",
+  "results": {
+    "scenarios": [
+      {
+        "name": "health_check",
+        "count": 400,
+        "p50_ms": 671.72,
+        "p95_ms": 2533.65,
+        "p99_ms": 3625.94,
+        "ops_sec": 101.5,
+        "errors": 0,
+        "duration_sec": 3.94,
+        "target_p99_ms": 50,
+        "passed": false
+      },
+      {
+        "name": "cortexql_select",
+        "count": 200,
+        "p50_ms": 706.03,
+        "p95_ms": 1822.24,
+        "p99_ms": 1944.16,
+        "ops_sec": 97.7,
+        "errors": 0,
+        "duration_sec": 2.05,
+        "target_p99_ms": 100,
+        "passed": false
+      },
+      {
+        "name": "cortexql_insert",
+        "count": 200,
+        "p50_ms": 723.97,
+        "p95_ms": 1850.39,
+        "p99_ms": 1977.35,
+        "ops_sec": 98.5,
+        "errors": 0,
+        "duration_sec": 2.03,
+        "target_p99_ms": 200,
+        "passed": false
+      },
+      {
+        "name": "vector_search",
+        "count": 50,
+        "p50_ms": 215.92,
+        "p95_ms": 370.92,
+        "p99_ms": 394.92,
+        "ops_sec": 119.4,
+        "errors": 0,
+        "duration_sec": 0.42,
+        "target_p99_ms": 500,
+        "passed": true
+      },
+      {
+        "name": "identity_resolve",
+        "count": 50,
+        "p50_ms": 225.34,
+        "p95_ms": 364.85,
+        "p99_ms": 371.22,
+        "ops_sec": 127.0,
+        "errors": 0,
+        "duration_sec": 0.39,
+        "target_p99_ms": 200,
+        "passed": false
+      },
+      {
+        "name": "cache_stats",
+        "count": 200,
+        "p50_ms": 342.48,
+        "p95_ms": 1161.88,
+        "p99_ms": 1165.76,
+        "ops_sec": 152.7,
+        "errors": 200,
+        "duration_sec": 1.31,
+        "target_p99_ms": 50,
+        "passed": false
+      }
+    ]
+  }
+}

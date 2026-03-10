@@ -1,6 +1,5 @@
-"""MemoryCore - Brain Region: Working Memory (Prefrontal Cortex)
-Ultra-fast KV cache. Sessions. Rate limiting. Pub/Sub.
-REPLACES: Redis + Memcached"""
+"""MemoryCore — Fast KV Cache Engine
+Ultra-fast KV cache via Redis. Sessions, rate limiting, pub/sub."""
 
 from typing import Any, Dict, Optional
 from cortexdb.engines import BaseEngine

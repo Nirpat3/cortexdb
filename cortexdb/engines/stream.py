@@ -1,6 +1,6 @@
-"""StreamCore - Brain Region: Thalamic Relay (Event Streaming)
-Real-time event bus. Agent events, heartbeats, notifications.
-REPLACES: Kafka (for MVP/Growth). Uses Redis Streams."""
+"""StreamCore — Real-Time Event Streaming Engine
+Event bus for agent events, heartbeats, and notifications.
+Uses Redis Streams for lightweight pub/sub."""
 
 import json
 import time

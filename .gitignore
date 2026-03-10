@@ -37,3 +37,11 @@ docker-compose.override.yml
 # Logs
 *.log
 logs/
+
+# Node.js / TypeScript SDK
+node_modules/
+sdk/dist/
+sdk/node_modules/
+dashboard/node_modules/
+dashboard/.next/
+*.tsbuildinfo

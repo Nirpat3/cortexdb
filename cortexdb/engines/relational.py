@@ -1,6 +1,6 @@
-"""RelationalCore - Brain Region: Neocortex (Long-Term Structured Memory)
-Wraps PostgreSQL 16 + TimescaleDB + Apache AGE extensions.
-REPLACES: PostgreSQL + Neo4j + TimescaleDB (3 databases -> 1)"""
+"""RelationalCore — Primary Storage Engine
+Wraps PostgreSQL 16 + Citus + TimescaleDB extensions.
+ACID transactions, business data, and the backbone of CortexDB."""
 
 import json
 from typing import Any, Dict, Optional

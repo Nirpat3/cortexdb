@@ -1,7 +1,6 @@
-"""GraphCore - Brain Region: Association Cortex (Relationships)
-Graph queries via Apache AGE extension on PostgreSQL.
-For MVP: uses recursive CTEs in standard SQL.
-REPLACES: Neo4j (via PostgreSQL extension = zero extra infra)"""
+"""GraphCore — Relationship Traversal Engine
+Graph queries via recursive CTEs on PostgreSQL.
+Provides graph traversal without a separate graph database."""
 
 import json
 from typing import Any, Dict, List, Optional

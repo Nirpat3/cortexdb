@@ -1,7 +1,6 @@
-"""ImmutableCore - Brain Region: Declarative Memory (Permanent, Tamper-Evident)
+"""ImmutableCore — Tamper-Evident Audit Ledger
 Append-only ledger with SHA-256 hash chain.
-For MVP: file-based. Upgrade path: Hyperledger Fabric.
-REPLACES: Hyperledger (for MVP/Growth)"""
+File-based for now; upgrade path: PostgreSQL-only with triggers."""
 
 import hashlib
 import json

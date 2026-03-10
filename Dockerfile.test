@@ -1,0 +1,12 @@
+# CortexDB Test Runner
+FROM python:3.12-slim
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt httpx pytest pytest-asyncio
+
+COPY cortexdb/ ./cortexdb/
+COPY tests/ ./tests/
+COPY scripts/ ./scripts/
+
+CMD ["pytest", "tests/", "-v", "--tb=short"]

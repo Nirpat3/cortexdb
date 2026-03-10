@@ -1,7 +1,6 @@
-"""TemporalCore - Brain Region: Cerebellum (Temporal Patterns)
+"""TemporalCore — Time-Series Engine
 Time-series storage via TimescaleDB extension on PostgreSQL.
-Handles heartbeats, metrics, and continuous aggregates.
-REPLACES: TimescaleDB standalone (runs inside RelationalCore's PostgreSQL)"""
+Handles heartbeats, metrics, and continuous aggregates."""
 
 import json
 from typing import Any, Dict, List, Optional

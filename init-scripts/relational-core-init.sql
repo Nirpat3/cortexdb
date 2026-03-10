@@ -11,6 +11,71 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE EXTENSION IF NOT EXISTS btree_gist;
 
 -- ================================================
+-- MULTI-TENANCY: Tenant management (DOC-019 Section 6)
+-- ================================================
+
+CREATE TABLE IF NOT EXISTS tenants (
+    tenant_id VARCHAR(100) PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    plan VARCHAR(20) DEFAULT 'free' CHECK (plan IN ('free','growth','enterprise','custom')),
+    status VARCHAR(20) DEFAULT 'onboarding' CHECK (status IN ('onboarding','active','suspended','offboarding','purged')),
+    api_key_hash VARCHAR(64) UNIQUE,
+    config JSONB DEFAULT '{}',
+    rate_limits JSONB DEFAULT '{}',
+    metadata JSONB DEFAULT '{}',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    activated_at TIMESTAMPTZ,
+    deactivated_at TIMESTAMPTZ
+);
+
+CREATE INDEX idx_tenants_status ON tenants(status);
+CREATE INDEX idx_tenants_api_key ON tenants(api_key_hash);
+
+-- ================================================
+-- A2A: Agent-to-Agent Protocol (DOC-017/018 G19)
+-- ================================================
+
+CREATE TABLE IF NOT EXISTS a2a_agent_cards (
+    agent_id VARCHAR(255) PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    skills TEXT[] DEFAULT '{}',
+    tools TEXT[] DEFAULT '{}',
+    auth_config JSONB DEFAULT '{}',
+    endpoint_url VARCHAR(500),
+    protocol VARCHAR(20) DEFAULT 'mcp',
+    model VARCHAR(100),
+    max_concurrent_tasks INTEGER DEFAULT 5,
+    tenant_id VARCHAR(100) REFERENCES tenants(tenant_id),
+    metadata JSONB DEFAULT '{}',
+    registered_at TIMESTAMPTZ DEFAULT NOW(),
+    last_heartbeat TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_a2a_tenant ON a2a_agent_cards(tenant_id);
+CREATE INDEX idx_a2a_skills ON a2a_agent_cards USING GIN(skills);
+
+CREATE TABLE IF NOT EXISTS a2a_tasks (
+    task_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    source_agent_id VARCHAR(255) REFERENCES a2a_agent_cards(agent_id),
+    target_agent_id VARCHAR(255) REFERENCES a2a_agent_cards(agent_id),
+    skill_requested VARCHAR(255),
+    input_data JSONB DEFAULT '{}',
+    output_data JSONB,
+    status VARCHAR(20) DEFAULT 'created' CHECK (status IN ('created','assigned','running','completed','failed','cancelled')),
+    priority INTEGER DEFAULT 3,
+    tenant_id VARCHAR(100) REFERENCES tenants(tenant_id),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    assigned_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    error TEXT
+);
+
+CREATE INDEX idx_a2a_tasks_status ON a2a_tasks(status);
+CREATE INDEX idx_a2a_tasks_target ON a2a_tasks(target_agent_id);
+CREATE INDEX idx_a2a_tasks_tenant ON a2a_tasks(tenant_id);
+
+-- ================================================
 -- RELATIONALCORE: Business data tables
 -- Brain Region: Neocortex (long-term structured memory)
 -- ================================================
@@ -374,14 +439,242 @@ SELECT append_to_ledger(
     'cortexdb_init'
 );
 
+-- ================================================
+-- MULTI-TENANCY: Add tenant_id + Row-Level Security (DOC-019 Section 6.1)
+-- ================================================
+
+-- Add tenant_id to all business tables
+ALTER TABLE blocks ADD COLUMN IF NOT EXISTS tenant_id VARCHAR(100) REFERENCES tenants(tenant_id);
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS tenant_id VARCHAR(100) REFERENCES tenants(tenant_id);
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS tenant_id VARCHAR(100) REFERENCES tenants(tenant_id);
+ALTER TABLE experience_ledger ADD COLUMN IF NOT EXISTS tenant_id VARCHAR(100) REFERENCES tenants(tenant_id);
+
+CREATE INDEX IF NOT EXISTS idx_blocks_tenant ON blocks(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_agents_tenant ON agents(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_tenant ON tasks(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_experience_tenant ON experience_ledger(tenant_id);
+
+-- Enable Row-Level Security
+ALTER TABLE blocks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE agents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE experience_ledger ENABLE ROW LEVEL SECURITY;
+
+-- RLS Policies: filter by current_setting('app.current_tenant')
+-- Bypass for superuser (cortex role)
+CREATE POLICY blocks_tenant_isolation ON blocks
+    USING (tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant', true));
+
+CREATE POLICY agents_tenant_isolation ON agents
+    USING (tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant', true));
+
+CREATE POLICY tasks_tenant_isolation ON tasks
+    USING (tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant', true));
+
+CREATE POLICY experience_tenant_isolation ON experience_ledger
+    USING (tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant', true));
+
+-- Rate limiting tracking table
+CREATE TABLE IF NOT EXISTS rate_limit_log (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id VARCHAR(100),
+    tier VARCHAR(20),
+    endpoint VARCHAR(255),
+    count INTEGER DEFAULT 1,
+    window_start TIMESTAMPTZ DEFAULT NOW(),
+    exceeded BOOLEAN DEFAULT FALSE
+);
+
+CREATE INDEX idx_rate_limit_tenant ON rate_limit_log(tenant_id, window_start);
+
+-- ================================================
+-- SEED: Additional ASA Standards for multi-tenancy
+-- ================================================
+
+INSERT INTO asa_standards (standard_id, category, title, description, enforcement, source_document) VALUES
+('NIRLAB-SEC-003', 'Security', 'Tenant Data Isolation', 'RLS enabled on all tenant tables. Cross-tenant access blocked at DB level.', 'HARD', 'DOC-019'),
+('NIRLAB-SEC-004', 'Security', 'API Key Hashing', 'API keys stored as SHA-256 hash. Plaintext never persisted.', 'HARD', 'DOC-019'),
+('NIRLAB-SEC-005', 'Security', 'Rate Limiting', 'All tiers enforced: global, per-customer, per-agent, per-endpoint.', 'HARD', 'DOC-019'),
+('NIRLAB-STD-010', 'Observability', 'Distributed Tracing', 'All requests carry trace_id. Spans for each engine hop.', 'SOFT', 'DOC-019'),
+('NIRLAB-STD-011', 'Observability', 'Prometheus Metrics', 'All services expose /health/metrics in Prometheus format.', 'SOFT', 'DOC-019')
+ON CONFLICT (standard_id) DO NOTHING;
+
+-- ================================================
+-- CORTEXGRAPH: Customer Intelligence (DOC-020)
+-- Layer 1: Identity Resolution
+-- Layer 2: Event Database
+-- Layer 3: Relationship Graph
+-- Layer 4: Behavioral Profile
+-- ================================================
+
+-- Customers master table (identity resolution target)
+CREATE TABLE IF NOT EXISTS customers (
+    customer_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    canonical_name VARCHAR(255),
+    canonical_email VARCHAR(255),
+    canonical_phone VARCHAR(50),
+    status VARCHAR(20) DEFAULT 'active' CHECK (status IN ('active','merged','suspended','deleted')),
+    merge_count INTEGER DEFAULT 0,
+    confidence_score DOUBLE PRECISION DEFAULT 1.0,
+    first_seen_at TIMESTAMPTZ DEFAULT NOW(),
+    last_seen_at TIMESTAMPTZ DEFAULT NOW(),
+    tenant_id VARCHAR(100) REFERENCES tenants(tenant_id),
+    metadata JSONB DEFAULT '{}'
+);
+
+CREATE INDEX idx_customers_email ON customers(canonical_email);
+CREATE INDEX idx_customers_phone ON customers(canonical_phone);
+CREATE INDEX idx_customers_tenant ON customers(tenant_id);
+CREATE INDEX idx_customers_status ON customers(status);
+
+-- Customer identifiers (multi-identifier resolution)
+CREATE TABLE IF NOT EXISTS customer_identifiers (
+    identifier_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    customer_id UUID NOT NULL REFERENCES customers(customer_id) ON DELETE CASCADE,
+    identifier_type VARCHAR(30) NOT NULL CHECK (identifier_type IN (
+        'email','phone','device_id','loyalty_id','cookie','ip',
+        'social_handle','pos_customer_id','payment_token'
+    )),
+    identifier_value VARCHAR(500) NOT NULL,
+    source VARCHAR(100) DEFAULT 'api',
+    confidence DOUBLE PRECISION DEFAULT 1.0,
+    first_seen_at TIMESTAMPTZ DEFAULT NOW(),
+    last_seen_at TIMESTAMPTZ DEFAULT NOW(),
+    tenant_id VARCHAR(100) REFERENCES tenants(tenant_id),
+    UNIQUE(identifier_type, identifier_value, tenant_id)
+);
+
+CREATE INDEX idx_ci_customer ON customer_identifiers(customer_id);
+CREATE INDEX idx_ci_lookup ON customer_identifiers(identifier_type, identifier_value);
+CREATE INDEX idx_ci_tenant ON customer_identifiers(tenant_id);
+
+-- Customer events (TimescaleDB hypertable)
+CREATE TABLE IF NOT EXISTS customer_events (
+    time TIMESTAMPTZ NOT NULL,
+    event_id UUID DEFAULT gen_random_uuid(),
+    customer_id UUID NOT NULL,
+    event_type VARCHAR(100) NOT NULL,
+    properties JSONB DEFAULT '{}',
+    source VARCHAR(100) DEFAULT 'api',
+    session_id VARCHAR(255),
+    channel VARCHAR(50),
+    tenant_id VARCHAR(100),
+    amount DOUBLE PRECISION
+);
+
+SELECT create_hypertable('customer_events', 'time', if_not_exists => TRUE);
+CREATE INDEX idx_ce_customer ON customer_events(customer_id, time DESC);
+CREATE INDEX idx_ce_type ON customer_events(event_type, time DESC);
+CREATE INDEX idx_ce_tenant ON customer_events(tenant_id, time DESC);
+CREATE INDEX idx_ce_session ON customer_events(session_id);
+
+-- Customer merge history (audit trail in ImmutableCore)
+CREATE TABLE IF NOT EXISTS customer_merges (
+    merge_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    canonical_id UUID NOT NULL REFERENCES customers(customer_id),
+    merged_id UUID NOT NULL REFERENCES customers(customer_id),
+    reason VARCHAR(50) DEFAULT 'manual',
+    identifiers_moved INTEGER DEFAULT 0,
+    merged_at TIMESTAMPTZ DEFAULT NOW(),
+    merged_by VARCHAR(100) DEFAULT 'system',
+    tenant_id VARCHAR(100) REFERENCES tenants(tenant_id)
+);
+
+CREATE INDEX idx_merges_canonical ON customer_merges(canonical_id);
+CREATE INDEX idx_merges_merged ON customer_merges(merged_id);
+
+-- Customer profiles (materialized from events)
+CREATE TABLE IF NOT EXISTS customer_profiles (
+    customer_id UUID PRIMARY KEY REFERENCES customers(customer_id),
+    recency_days DOUBLE PRECISION DEFAULT 0,
+    frequency_90d INTEGER DEFAULT 0,
+    monetary_90d DOUBLE PRECISION DEFAULT 0,
+    avg_basket DOUBLE PRECISION DEFAULT 0,
+    churn_probability DOUBLE PRECISION DEFAULT 0,
+    health_score DOUBLE PRECISION DEFAULT 100.0,
+    rfm_segment VARCHAR(30) DEFAULT 'New',
+    segments TEXT[] DEFAULT '{}',
+    ltv DOUBLE PRECISION DEFAULT 0,
+    preferred_categories TEXT[] DEFAULT '{}',
+    preferred_channel VARCHAR(50),
+    next_purchase_predicted_days INTEGER,
+    tenant_id VARCHAR(100) REFERENCES tenants(tenant_id),
+    computed_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_cp_segment ON customer_profiles(rfm_segment);
+CREATE INDEX idx_cp_churn ON customer_profiles(churn_probability DESC);
+CREATE INDEX idx_cp_health ON customer_profiles(health_score);
+CREATE INDEX idx_cp_tenant ON customer_profiles(tenant_id);
+
+-- Continuous aggregate for event counts per customer
+CREATE MATERIALIZED VIEW IF NOT EXISTS customer_event_counts_daily
+WITH (timescaledb.continuous) AS
+SELECT
+    time_bucket('1 day', time) AS bucket,
+    customer_id,
+    event_type,
+    COUNT(*) AS event_count,
+    COALESCE(SUM(amount), 0) AS total_amount,
+    tenant_id
+FROM customer_events
+GROUP BY bucket, customer_id, event_type, tenant_id
+WITH NO DATA;
+
+-- RLS on CortexGraph tables
+ALTER TABLE customers ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_identifiers ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_profiles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY customers_tenant_isolation ON customers
+    USING (tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant', true));
+
+CREATE POLICY ci_tenant_isolation ON customer_identifiers
+    USING (tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant', true));
+
+CREATE POLICY cp_tenant_isolation ON customer_profiles
+    USING (tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant', true));
+
+-- GraphCore: Apache AGE graph for relationship traversal (DOC-020 Section 3.3)
+-- Requires AGE extension; gracefully skip if not available
+DO $$
+BEGIN
+    CREATE EXTENSION IF NOT EXISTS age;
+    LOAD 'age';
+    SET search_path = ag_catalog, "$user", public;
+
+    -- Create customer graph
+    PERFORM create_graph('customer_graph');
+
+    RAISE NOTICE 'Apache AGE graph "customer_graph" created successfully';
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'Apache AGE not available - using SQL fallback for graph queries';
+END $$;
+
+-- ================================================
+-- SEED: CortexGraph ASA Standards
+-- ================================================
+
+INSERT INTO asa_standards (standard_id, category, title, description, enforcement, source_document) VALUES
+('NIRLAB-CG-001', 'CortexGraph', 'Identity Resolution', 'Deterministic match on exact identifiers. Probabilistic match requires cosine > 0.92.', 'HARD', 'DOC-020'),
+('NIRLAB-CG-002', 'CortexGraph', 'Customer Merge Audit', 'All customer merges must be logged to ImmutableCore with reason and identifier count.', 'HARD', 'DOC-020'),
+('NIRLAB-CG-003', 'CortexGraph', 'Event Auto-Edge', 'Purchase, visit, and campaign events auto-create graph edges.', 'SOFT', 'DOC-020'),
+('NIRLAB-CG-004', 'CortexGraph', 'Profile Freshness', 'Customer profiles recomputed nightly via Sleep Cycle. Max staleness 24hr.', 'SOFT', 'DOC-020')
+ON CONFLICT (standard_id) DO NOTHING;
+
 DO $$
 BEGIN
     RAISE NOTICE '================================================';
-    RAISE NOTICE 'CortexDB RelationalCore + TemporalCore + ImmutableCore initialized';
+    RAISE NOTICE 'CortexDB v3.0 + CortexGraph Schema Initialized';
+    RAISE NOTICE 'Tables: tenants, a2a_agent_cards, a2a_tasks';
     RAISE NOTICE 'Tables: blocks, agents, tasks, experience_ledger, grid_nodes, grid_links';
-    RAISE NOTICE 'Tables: asa_standards, query_paths, response_cache_meta';
-    RAISE NOTICE 'TimeSeries: heartbeats, agent_metrics, query_metrics';
+    RAISE NOTICE 'Tables: asa_standards, query_paths, response_cache_meta, rate_limit_log';
+    RAISE NOTICE 'CortexGraph: customers, customer_identifiers, customer_events';
+    RAISE NOTICE 'CortexGraph: customer_merges, customer_profiles';
+    RAISE NOTICE 'TimeSeries: heartbeats, agent_metrics, query_metrics, customer_events';
     RAISE NOTICE 'ImmutableLedger: append-only with SHA-256 hash chain';
-    RAISE NOTICE 'ASA Standards: 16 standards seeded';
+    RAISE NOTICE 'RLS: enabled on blocks, agents, tasks, experience_ledger, customers, customer_identifiers, customer_profiles';
+    RAISE NOTICE 'ASA Standards: 25 standards seeded (21 + 4 CortexGraph)';
+    RAISE NOTICE 'Multi-Tenancy: ACTIVE | A2A: ACTIVE | CortexGraph: ACTIVE';
     RAISE NOTICE '================================================';
 END $$;

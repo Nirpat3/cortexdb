@@ -1,14 +1,14 @@
 # ============================================================
-# CortexDB - Consciousness-Inspired Unified Database
-# Production Dockerfile
+# CortexDB - AI Agent Data Infrastructure
+# Intelligence Sidecar (Python Service)
 # (c) 2026 Nirlab Inc.
 # ============================================================
 
 FROM python:3.12-slim AS base
 
 LABEL maintainer="Nirlab Inc <eng@nirlab.ai>"
-LABEL description="CortexDB - One database to replace them all"
-LABEL version="2.0.0"
+LABEL description="CortexDB intelligence sidecar — semantic cache, cross-engine queries, agent ops"
+LABEL version="4.0.0"
 
 RUN groupadd -r cortex && useradd -r -g cortex cortex
 

@@ -1,4 +1,4 @@
-# CortexDB Dependencies
+# CortexDB Dependencies v4.0
 # (c) 2026 Nirlab Inc.
 
 # Core API
@@ -6,7 +6,7 @@ fastapi==0.115.*
 uvicorn[standard]==0.34.*
 pydantic==2.*
 
-# RelationalCore (Neocortex) + TemporalCore (Cerebellum) + GraphCore
+# RelationalCore (Neocortex) + TemporalCore (Cerebellum) + GraphCore + Citus
 asyncpg==0.30.*
 
 # MemoryCore (Working Memory) + StreamCore (Thalamic Relay)
@@ -17,6 +17,30 @@ qdrant-client==1.12.*
 
 # ImmutableCore (Declarative Memory) - built-in (file-based + PostgreSQL)
 # No extra dependency
+
+# Embedding Pipeline (G8) - optional, for R2 semantic cache
+# sentence-transformers==3.*  # Uncomment to enable ML embeddings (80MB model)
+
+# Field-Level Encryption (Compliance)
+cryptography==44.*
+
+# Observability (DOC-019 Section 2)
+# opentelemetry-sdk==1.*
+# opentelemetry-instrumentation-fastapi==0.*
+# opentelemetry-instrumentation-asyncpg==0.*
+# opentelemetry-instrumentation-redis==0.*
+# opentelemetry-instrumentation-httpx==0.*
+# opentelemetry-exporter-otlp==1.*
+
+# Fast Data Rendering (optional formats)
+# msgpack==1.*              # MessagePack binary format (30-50% smaller than JSON)
+# pyarrow==18.*             # Apache Arrow columnar format (analytics)
+# zstandard==0.23.*         # Zstandard compression (better than gzip)
+# lz4==4.*                  # LZ4 compression (fastest)
+
+# Testing & Benchmarks
+pytest==8.*
+pytest-asyncio==0.24.*
 
 # Utilities
 python-dotenv==1.*
