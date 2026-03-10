@@ -628,5 +628,5 @@ docker compose up -d
 
 ---
 
-*CortexDB™ — AI Agent Data Infrastructure.*
+*CortexDB™ — From Docker Compose to planet-scale.*
 *Copyright (c) 2026 Nirlab Inc.*

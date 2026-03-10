@@ -4,24 +4,6 @@
 
 ---
 
-## Choosing the Right Client
-
-CortexDB is an intelligence layer on top of PostgreSQL, Redis, and Qdrant. Not every operation needs to go through the CortexDB API.
-
-**For simple CRUD operations**, use the TypeScript SDK's direct PostgreSQL access (via `pg` or Prisma). Querying a single table, inserting a row, or running a standard SQL join does not benefit from the CortexDB coordination layer. Going direct is faster and simpler.
-
-**Use the CortexDB REST API (or MCP tools) when you need cross-engine operations**:
-- Write fan-out (a single write that propagates to relational, cache, vector, and stream engines)
-- Semantic search (vector similarity via Qdrant)
-- Read cascade with semantic caching (5-tier cache hierarchy)
-- CortexGraph customer intelligence (identity resolution, 360 views, recommendations)
-- Agent discovery and task delegation (A2A protocol)
-- Compliance audit trails (immutable ledger writes)
-
-The **TypeScript SDK** (`@nirlab/cortexdb`) is the recommended client for application development. It wraps both direct PG access and the CortexDB REST API.
-
----
-
 ## Table of Contents
 
 1. [Getting Started](#1-getting-started)
@@ -39,6 +21,8 @@ The **TypeScript SDK** (`@nirlab/cortexdb`) is the recommended client for applic
 13. [SDK Patterns](#13-sdk-patterns)
 14. [Error Handling](#14-error-handling)
 15. [Performance Tuning](#15-performance-tuning)
+16. [Agent Memory API](#16-agent-memory-api)
+17. [Embedding Sync Pipeline](#17-embedding-sync-pipeline)
 
 ---
 
@@ -313,6 +297,16 @@ Every query returns:
 ---
 
 ## 4. Writing Data
+
+### Transactional Outbox
+
+Writes that fan out to multiple engines use a transactional outbox pattern to guarantee
+delivery. The outbox worker (`cortexdb/core/outbox_worker.py`) polls the `outbox` table
+and dispatches pending events to async engines. The schema is defined in
+`init-scripts/outbox_schema.sql`.
+
+If an async engine is temporarily unavailable, the outbox retries with exponential backoff.
+This replaces fire-and-forget async dispatch and ensures no events are lost.
 
 ### Write Fan-Out
 
@@ -713,6 +707,19 @@ GET /v1/compliance/audit/fedramp
 GET /v1/compliance/audit/soc2
 ```
 
+### Encryption Key Configuration
+
+Field encryption requires the `CORTEX_ENCRYPTION_KEY` environment variable. This key is used
+in both read and write paths to transparently encrypt and decrypt sensitive fields:
+
+```bash
+# Set in .env or environment
+export CORTEX_ENCRYPTION_KEY="your-256-bit-base64-encoded-key"
+```
+
+When set, all fields classified as `confidential` are encrypted at write time and decrypted
+at read time. If the variable is unset, encryption is disabled and a warning is logged at startup.
+
 ### Field Encryption
 
 Sensitive fields are automatically encrypted based on table classification:
@@ -900,6 +907,28 @@ Retry-After: 30
 3. **Use time ranges**: Filter time-series with `WHERE time > NOW() - INTERVAL '...'`
 4. **Leverage indexes**: Check `GET /v1/admin/indexes/recommend` for missing indexes
 
+### Adaptive Cache Thresholds
+
+CortexDB supports per-collection semantic cache thresholds that adapt based on usage patterns.
+Configure thresholds via the admin endpoint:
+
+```bash
+POST /admin/cache/config
+{
+  "collection": "block_embeddings",
+  "semantic_threshold": 0.88,
+  "ttl_seconds": 600
+}
+```
+
+```bash
+# Read current cache configuration
+GET /admin/cache/config
+```
+
+The adaptive cache automatically adjusts thresholds per collection based on hit rates and
+query patterns. Override defaults in `cortexdb/core/cache_config.py`.
+
 ### Cache Strategy
 
 | Scenario | Hint | Effect |
@@ -927,5 +956,98 @@ POST /v1/admin/indexes/create?concurrently=true
 
 ---
 
-*CortexDB™ — AI Agent Data Infrastructure.*
+## 16. Agent Memory API
+
+CortexDB provides a persistent memory layer for AI agents, allowing them to store, recall,
+forget, and share contextual memories across sessions. Implementation lives in
+`cortexdb/mcp/agent_memory.py` with the schema in `init-scripts/agent_memory_schema.sql`.
+
+### REST Endpoints
+
+```bash
+# Store a memory
+POST /v1/agent/memory/store
+{
+  "agent_id": "agent-42",
+  "key": "user_preference",
+  "value": {"theme": "dark", "language": "en"},
+  "scope": "session",
+  "ttl_seconds": 3600
+}
+
+# Recall memories
+POST /v1/agent/memory/recall
+{
+  "agent_id": "agent-42",
+  "key": "user_preference"
+}
+
+# Forget a memory
+POST /v1/agent/memory/forget
+{
+  "agent_id": "agent-42",
+  "key": "user_preference"
+}
+
+# Share memory between agents
+POST /v1/agent/memory/share
+{
+  "from_agent_id": "agent-42",
+  "to_agent_id": "agent-99",
+  "key": "user_preference"
+}
+```
+
+### MCP Tools
+
+Four MCP tools are registered for agent memory:
+
+| Tool | Description |
+|------|-------------|
+| `agent_memory.store` | Persist a key-value memory for an agent |
+| `agent_memory.recall` | Retrieve stored memories by key or pattern |
+| `agent_memory.forget` | Delete a specific memory |
+| `agent_memory.share` | Copy a memory from one agent to another |
+
+These tools appear in `GET /v1/mcp/tools` alongside the existing tool set.
+
+---
+
+## 17. Embedding Sync Pipeline
+
+The embedding sync pipeline keeps vector embeddings in Qdrant synchronized with relational
+data in PostgreSQL. Implementation is in `cortexdb/core/embedding_sync.py`, with database
+triggers defined in `init-scripts/embedding_sync_triggers.sql`.
+
+### How It Works
+
+1. PostgreSQL triggers on configured tables fire on INSERT/UPDATE, writing change records to
+   the `embedding_sync_queue` table.
+2. The sync worker polls the queue, generates embeddings using the unified embedding service
+   (`cortexdb/core/embedding.py`), and upserts vectors into Qdrant.
+3. Processed queue entries are marked complete; failed entries are retried with backoff.
+
+### Synced Tables
+
+By default, the following tables are synced:
+
+| Table | Embedded Column(s) | Qdrant Collection |
+|-------|--------------------|--------------------|
+| `blocks` | `description`, `tags` | `block_embeddings` |
+| `experiences` | `description` | `experience_embeddings` |
+| `customers` | `canonical_name`, `segments` | `customer_embeddings` |
+
+### Configuration
+
+Sync behavior is controlled via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `EMBEDDING_SYNC_INTERVAL_SEC` | `5` | Poll interval for the sync worker |
+| `EMBEDDING_SYNC_BATCH_SIZE` | `100` | Max records per sync cycle |
+| `EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | Sentence-transformer model |
+
+---
+
+*CortexDB™ — Built for developers who refuse to manage seven databases.*
 *Copyright (c) 2026 Nirlab Inc.*
