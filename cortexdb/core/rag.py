@@ -381,17 +381,27 @@ class RAGPipeline:
         """Delete a document and all its chunks from PG + Qdrant."""
         deleted_chunks = 0
 
-        # Get chunk IDs from PG
+        # Get chunk IDs from PG (with tenant isolation)
         if "relational" in self.engines:
             pool = self.engines["relational"].pool
             async with pool.acquire() as conn:
-                rows = await conn.fetch(
-                    "SELECT chunk_id FROM rag_chunks WHERE doc_id = $1", doc_id)
-                chunk_ids = [r["chunk_id"] for r in rows]
-
-                # Delete from PG
-                await conn.execute("DELETE FROM rag_chunks WHERE doc_id = $1", doc_id)
-                await conn.execute("DELETE FROM rag_documents WHERE doc_id = $1", doc_id)
+                if tenant_id:
+                    rows = await conn.fetch(
+                        "SELECT chunk_id FROM rag_chunks WHERE doc_id = $1 AND tenant_id = $2",
+                        doc_id, tenant_id)
+                    chunk_ids = [r["chunk_id"] for r in rows]
+                    await conn.execute(
+                        "DELETE FROM rag_chunks WHERE doc_id = $1 AND tenant_id = $2",
+                        doc_id, tenant_id)
+                    await conn.execute(
+                        "DELETE FROM rag_documents WHERE doc_id = $1 AND tenant_id = $2",
+                        doc_id, tenant_id)
+                else:
+                    rows = await conn.fetch(
+                        "SELECT chunk_id FROM rag_chunks WHERE doc_id = $1", doc_id)
+                    chunk_ids = [r["chunk_id"] for r in rows]
+                    await conn.execute("DELETE FROM rag_chunks WHERE doc_id = $1", doc_id)
+                    await conn.execute("DELETE FROM rag_documents WHERE doc_id = $1", doc_id)
                 deleted_chunks = len(chunk_ids)
 
                 # Delete from Qdrant

@@ -350,6 +350,17 @@ class ReadCascade:
 
         self._r0_cache[key] = value
 
+    def invalidate_tenant_cache(self, tenant_id: str):
+        """Evict all R0 cache entries for a specific tenant after writes."""
+        if not tenant_id:
+            return
+        prefix = f"tenant:{tenant_id}:"
+        keys_to_evict = [k for k in self._r0_cache if k.startswith(prefix)]
+        for k in keys_to_evict:
+            del self._r0_cache[k]
+        if keys_to_evict:
+            logger.debug("R0 cache: evicted %d entries for tenant %s", len(keys_to_evict), tenant_id)
+
     async def _promote_to_r1(self, key: str, data: Any, ttl: int = 3600):
         if "memory" in self.engines:
             try:
@@ -370,6 +381,8 @@ class ReadCascade:
 class SynapticPlasticity:
     """Query path strengthening (Basal Ganglia). Frequently used paths get faster."""
 
+    MAX_PATHS = 10_000  # cap to prevent unbounded memory growth
+
     def __init__(self):
         self._path_strengths: Dict[str, float] = {}
         self._path_hits: Dict[str, int] = {}
@@ -378,6 +391,18 @@ class SynapticPlasticity:
         key = f"{query_hash}:{','.join(sorted(engines))}"
         self._path_strengths[key] = self._path_strengths.get(key, 1.0) + 1.0
         self._path_hits[key] = self._path_hits.get(key, 0) + 1
+
+        # Evict weakest paths when we exceed the cap
+        if len(self._path_strengths) > self.MAX_PATHS:
+            self._evict_weakest()
+
+    def _evict_weakest(self):
+        """Remove the weakest 10% of paths to stay within MAX_PATHS."""
+        to_remove = len(self._path_strengths) - self.MAX_PATHS + self.MAX_PATHS // 10
+        weakest = sorted(self._path_strengths, key=self._path_strengths.get)[:to_remove]
+        for key in weakest:
+            del self._path_strengths[key]
+            self._path_hits.pop(key, None)
 
     def decay(self, decay_rate: float = 0.1):
         for key in list(self._path_strengths.keys()):
@@ -528,11 +553,15 @@ class WriteFanOut:
             except Exception as e:
                 logger.warning(f"Audit logging error on write: {e}")
 
-        # Invalidate caches after write
+        # Invalidate caches after write (including tenant-scoped R0 eviction)
         if self.cache_invalidation:
             self._task_counter += 1
             task = asyncio.create_task(self._safe_cache_invalidation(data_type, write_payload))
             self._pending_tasks[f"cache-{self._task_counter}"] = task
+
+        # Evict R0 entries for the affected tenant to prevent stale reads
+        if tenant_id and hasattr(self, '_read_cascade') and self._read_cascade:
+            self._read_cascade.invalidate_tenant_cache(tenant_id)
 
         return results
 
@@ -737,6 +766,7 @@ class CortexDB:
                                         pool=pg_pool,
                                         field_encryption=self.field_encryption,
                                         audit=self.compliance_audit)
+        self.write_fanout._read_cascade = self.read_cascade
         self.bridge = BridgeEngine(self.engines)
         self.parser = CortexQLParser()
         self.precompute = PreComputeEngine(self.plasticity, self.read_cascade, self.engines)
@@ -885,7 +915,7 @@ class CortexDB:
         verdict = self.amygdala.assess(json.dumps(payload, default=str), actor)
         if not verdict.allowed:
             raise PermissionError(f"Write blocked by Amygdala: {verdict.threats_detected}")
-        return await self.write_fanout.write(data_type, payload, actor)
+        return await self.write_fanout.write(data_type, payload, actor, tenant_id=tenant_id)
 
     async def health(self) -> Dict:
         health = {

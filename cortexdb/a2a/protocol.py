@@ -280,9 +280,16 @@ class A2AProtocol:
         return None
 
     async def complete_task(self, task_id: str,
-                            output_data: Dict) -> Optional[A2ATask]:
+                            output_data: Dict,
+                            agent_id: str = None) -> Optional[A2ATask]:
         task = await self._load_task(task_id)
         if task and task.status == A2ATaskStatus.RUNNING:
+            # Verify the caller is the assigned target agent
+            if agent_id and task.target_agent_id and agent_id != task.target_agent_id:
+                logger.warning(
+                    f"A2A auth rejected: agent {agent_id} tried to complete "
+                    f"task {task_id} owned by {task.target_agent_id}")
+                return None
             task.status = A2ATaskStatus.COMPLETED
             task.output_data = output_data
             task.completed_at = time.time()
@@ -292,9 +299,16 @@ class A2AProtocol:
             return task
         return None
 
-    async def fail_task(self, task_id: str, error: str) -> Optional[A2ATask]:
+    async def fail_task(self, task_id: str, error: str,
+                        agent_id: str = None) -> Optional[A2ATask]:
         task = await self._load_task(task_id)
         if task and task.status in (A2ATaskStatus.ASSIGNED, A2ATaskStatus.RUNNING):
+            # Verify the caller is the assigned target agent
+            if agent_id and task.target_agent_id and agent_id != task.target_agent_id:
+                logger.warning(
+                    f"A2A auth rejected: agent {agent_id} tried to fail "
+                    f"task {task_id} owned by {task.target_agent_id}")
+                return None
             task.status = A2ATaskStatus.FAILED
             task.error = error
             task.completed_at = time.time()

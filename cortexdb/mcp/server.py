@@ -70,6 +70,7 @@ class CortexMCPServer:
                         "cortexql": {"type": "string", "description": "The CortexQL query to execute"},
                         "params": {"type": "object", "description": "Query parameters (optional)"},
                         "hint": {"type": "string", "description": "Query hint: 'cache_first', 'skip_semantic', 'force_refresh'"},
+                        "tenant_id": {"type": "string", "description": "Tenant ID for isolation (required in multi-tenant mode)"},
                     },
                     "required": ["cortexql"],
                 }),
@@ -82,6 +83,7 @@ class CortexMCPServer:
                         "data_type": {"type": "string", "description": "Data type: payment, agent, task, block, heartbeat, audit, experience"},
                         "payload": {"type": "object", "description": "Data payload"},
                         "actor": {"type": "string", "description": "Actor performing the write"},
+                        "tenant_id": {"type": "string", "description": "Tenant ID for isolation (required in multi-tenant mode)"},
                     },
                     "required": ["data_type", "payload"],
                 }),
@@ -274,7 +276,8 @@ class CortexMCPServer:
         try:
             if tool_name == "cortexdb.query":
                 result = await self.db.query(
-                    args["cortexql"], args.get("params"), args.get("hint"))
+                    args["cortexql"], args.get("params"), args.get("hint"),
+                    tenant_id=args.get("tenant_id"))
                 return MCPToolResult(content={
                     "data": result.data, "tier_served": result.tier_served.value,
                     "engines_hit": result.engines_hit,
@@ -284,7 +287,8 @@ class CortexMCPServer:
             elif tool_name == "cortexdb.write":
                 result = await self.db.write(
                     args["data_type"], args["payload"],
-                    args.get("actor", "mcp_agent"))
+                    args.get("actor", "mcp_agent"),
+                    tenant_id=args.get("tenant_id"))
                 return MCPToolResult(content={"status": "success", "fan_out": result})
 
             elif tool_name == "cortexdb.health":

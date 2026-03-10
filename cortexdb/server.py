@@ -193,8 +193,35 @@ _cors_origins = os.environ.get("CORTEX_CORS_ORIGINS", "http://localhost:3000,htt
 app.add_middleware(CORSMiddleware, allow_origins=_cors_origins,
                    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
                    allow_headers=["Authorization", "Content-Type", "X-Tenant-Key", "X-Request-ID"])
-app.add_middleware(RateLimitMiddleware, rate_limiter=None)  # Set in lifespan
-app.add_middleware(TenantMiddleware, tenant_manager=None)    # Set in lifespan
+# Middleware uses module-level globals so lifespan() can inject dependencies.
+# Starlette middleware instances are immutable after add_middleware(), so we
+# use a lambda-style wrapper that reads from the globals at request time.
+_tenant_middleware_instance = None
+_rate_limit_middleware_instance = None
+
+
+class _LazyTenantMiddleware(TenantMiddleware):
+    """Reads tenant_manager from module global, allowing lifespan() to set it."""
+    def __init__(self, app):
+        super().__init__(app, tenant_manager=None)
+
+    async def dispatch(self, request, call_next):
+        self.tenant_manager = tenant_mgr  # read from module global at request time
+        return await super().dispatch(request, call_next)
+
+
+class _LazyRateLimitMiddleware(RateLimitMiddleware):
+    """Reads rate_limiter from module global, allowing lifespan() to set it."""
+    def __init__(self, app):
+        super().__init__(app, rate_limiter=None)
+
+    async def dispatch(self, request, call_next):
+        self.rate_limiter = rate_limiter  # read from module global at request time
+        return await super().dispatch(request, call_next)
+
+
+app.add_middleware(_LazyRateLimitMiddleware)
+app.add_middleware(_LazyTenantMiddleware)
 
 
 def _tenant_id(request: Request) -> Optional[str]:

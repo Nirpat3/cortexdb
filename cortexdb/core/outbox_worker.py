@@ -27,6 +27,7 @@ class OutboxWorker:
     BATCH_SIZE = 50           # max entries claimed per poll
     CLEANUP_INTERVAL = 600.0  # 10 minutes between cleanup runs
     CLEANUP_AGE_HOURS = 24    # delete completed entries older than this
+    STUCK_TIMEOUT_SECONDS = 300  # 5 min: reset stuck 'processing' entries
 
     def __init__(self, pool: Any, engines: Dict[str, Any]):
         self.pool = pool
@@ -95,8 +96,29 @@ class OutboxWorker:
             except Exception as e:
                 logger.error(f"OutboxWorker cleanup error: {e}")
 
+    async def _recover_stuck(self):
+        """Reset entries stuck in 'processing' for longer than STUCK_TIMEOUT_SECONDS.
+
+        This handles the case where a worker crashed mid-dispatch, leaving
+        entries permanently in 'processing' state with no one to finish them.
+        """
+        async with self.pool.acquire() as conn:
+            result = await conn.execute("""
+                UPDATE write_outbox
+                SET status = 'pending',
+                    error_message = 'recovered from stuck processing state'
+                WHERE status = 'processing'
+                  AND processed_at IS NULL
+                  AND created_at < NOW() - ($1 || ' seconds')::interval
+            """, str(self.STUCK_TIMEOUT_SECONDS))
+            if result and result != "UPDATE 0":
+                logger.warning(f"OutboxWorker recovered stuck entries: {result}")
+
     async def _process_batch(self):
         """Claim a batch of pending/retryable entries and dispatch them."""
+        # First, recover any entries stuck in 'processing' from crashed workers
+        await self._recover_stuck()
+
         async with self.pool.acquire() as conn:
             # Claim entries atomically with FOR UPDATE SKIP LOCKED
             rows = await conn.fetch("""
