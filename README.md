@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/version-4.0.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-6.1.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/license-Proprietary-red" alt="License">
   <img src="https://img.shields.io/badge/PostgreSQL-16-336791" alt="PostgreSQL">
   <img src="https://img.shields.io/badge/Python-3.11+-3776AB" alt="Python">
@@ -28,6 +28,10 @@ CortexDB is built **on top of** PostgreSQL, Redis, and Qdrant — not as a repla
 | **MCP Tool Exposure** | AI agents discover and use CortexDB as tools automatically | Not in database scope |
 | **Cross-Engine Queries** | "Find payments from customers similar to X" hits vector + relational in one call | ORMs are single-engine |
 | **5-Tier Read Cascade** | R0 (process LRU) → R1 (Redis) → R2 (semantic) → R3 (PostgreSQL) → R4 (deep retrieval) | ORMs have no tiered caching |
+| **Embedding Sync** | PG NOTIFY triggers batch re-embed → Qdrant upsert; vectors never go stale | ORMs don't manage embeddings |
+| **Agent Memory** | store/recall/forget/share with Ebbinghaus temporal decay across episodic, semantic, working memory | Not in database scope |
+| **Field Encryption** | AES-256-GCM encryption wired into read/write data paths with audit logging | ORMs don't encrypt at field level |
+| **Transactional Outbox** | PG-backed outbox replaces in-memory DLQ; survives crashes and restarts | ORMs have no outbox pattern |
 
 ## What CortexDB Does NOT Do
 
@@ -179,7 +183,7 @@ One `write()` call automatically fans out to multiple engines based on data type
 | `block` | Relational | Vector + Memory |
 | `audit` | Immutable | Relational |
 
-Failed async writes go to a dead letter queue (DLQ) with backpressure at 1000 pending tasks.
+Failed async writes are captured by a **transactional outbox** (PostgreSQL-backed) that survives crashes and restarts. An outbox worker retries delivery with exponential backoff, replacing the previous in-memory DLQ. Backpressure applies at 1000 pending tasks.
 
 ---
 
@@ -194,6 +198,10 @@ CortexDB exposes itself as MCP tools that AI agents (Claude, GPT, LangGraph) can
 - `cortexdb.agents.list` — List registered agents
 - `cortexdb.a2a.discover` — Find agents by capability
 - `cortexdb.cache.stats` — Cache performance metrics
+- `memory.store` — Store agent memory (episodic, semantic, or working)
+- `memory.recall` — Recall memories with Ebbinghaus temporal decay
+- `memory.forget` — GDPR-compliant deletion across all engines
+- `memory.share` — Share memories between agents
 
 ### A2A Protocol
 Agent-to-agent task coordination:
@@ -206,16 +214,20 @@ Agent-to-agent task coordination:
 
 ## Multi-Tenancy
 
-- PostgreSQL Row-Level Security (RLS) per tenant
+- PostgreSQL Row-Level Security (RLS) per tenant with **SET LOCAL** in transactions (prevents cross-tenant data leaks on pooled connections)
 - Per-engine isolation: key prefix (Redis), collection (Qdrant), stream key (Redis Streams)
 - API key → tenant resolution in middleware
 - Rate limiting per tenant, agent, and endpoint
+- **Field-level encryption** (AES-256-GCM) for sensitive tenant data with audit logging
+- Tenant configuration loaded from PostgreSQL on startup (write-through cache, survives restarts)
 
 ---
 
 ## Compliance Controls (Pre-Audit)
 
-CortexDB maps to compliance frameworks but has **not been audited**. These are implementation controls, not certifications:
+CortexDB maps to compliance frameworks but has **not been audited**. These are implementation controls, not certifications.
+
+**Field encryption** (AES-256-GCM) is wired into the actual read/write data paths, providing encryption-at-rest for sensitive fields with full audit logging.
 
 | Framework | Controls Mapped | Status |
 |-----------|----------------|--------|
@@ -223,6 +235,18 @@ CortexDB maps to compliance frameworks but has **not been audited**. These are i
 | SOC 2 (Type II) | 8 Trust Service Criteria | Mapped, not audited |
 | HIPAA | 8 Technical Safeguards | Mapped, not audited |
 | PCI DSS v4.0 | 8 Requirements | Mapped, not audited |
+
+---
+
+## Security
+
+CortexDB v6.1.0 addresses critical security fixes identified by the PhD Expert Panel:
+
+- **RLS hardening**: All transactions use `SET LOCAL` to set the tenant context, preventing cross-tenant data leaks on pooled connections
+- **Admin auth bypass fix**: Requests are denied when `CORTEX_ADMIN_TOKEN` is unset; token comparison uses `hmac.compare_digest` to prevent timing attacks
+- **Unified embedding codepath**: Eliminated a duplicate embedding path in vector.py that used incompatible hashing; all embeddings now flow through a single `EmbeddingPipeline`
+- **PostgreSQL-backed immutable ledger**: Replaced the file-based append-only engine with a PostgreSQL-backed ledger (ACID, crash-safe)
+- **Request coalescing**: Concurrent identical queries in the read cascade are coalesced into a single backend request, preventing cache stampede
 
 ---
 
@@ -241,6 +265,10 @@ cortexdb/
 │   │   ├── database.py        # Read cascade, write fan-out, plasticity
 │   │   ├── bridge.py          # Cross-engine query merging
 │   │   ├── embedding.py       # ML embedding pipeline
+│   │   ├── embedding_sync.py  # PG NOTIFY → batch re-embed → Qdrant upsert
+│   │   ├── agent_memory.py    # Agent memory protocol (Ebbinghaus decay)
+│   │   ├── outbox_worker.py   # Transactional outbox (PG-backed)
+│   │   ├── cache_config.py    # Adaptive per-collection cache thresholds
 │   │   └── parser.py          # CortexQL parser
 │   ├── engines/               # 7 storage engine clients
 │   ├── mcp/                   # MCP server for AI agents
@@ -261,6 +289,7 @@ cortexdb/
 | [White Paper](docs/WHITEPAPER.md) | Technical architecture deep-dive |
 | [Developer Guide](docs/DEVELOPER-GUIDE.md) | API reference and integration guide |
 | [Docker Guide](docs/DOCKER-GUIDE.md) | Deployment and operations |
+| [PhD Evaluation](docs/PHD-EVALUATION.md) | Expert panel evaluation and enhancement roadmap |
 | [Contributing](CONTRIBUTING.md) | Development setup and guidelines |
 
 ---

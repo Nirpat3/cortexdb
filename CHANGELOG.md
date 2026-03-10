@@ -1,5 +1,48 @@
 # CortexDB Changelog
 
+## [6.1.0] - 2026-03-10
+
+**PhD Expert Panel Evaluation + P0/P1/P2 Enhancements**
+
+Type: Major
+Previous: 6.0.0
+
+### Security (P0)
+- Fixed RLS: SET LOCAL in transactions prevents cross-tenant data leaks on pooled connections
+- Fixed admin auth bypass: deny all requests when CORTEX_ADMIN_TOKEN unset; use hmac.compare_digest
+- Replaced file-based immutable engine with PostgreSQL-backed ledger (ACID, crash-safe)
+- Tenants loaded from PostgreSQL on startup (write-through cache, survives restart)
+- Unified dual embedding codepaths (deleted incompatible hash fallback from vector.py)
+- Request coalescing in read cascade prevents cache stampede on concurrent identical queries
+
+### Production Readiness (P1)
+- Embedding sync pipeline: PG NOTIFY triggers → batch re-embed → Qdrant upsert (eliminates stale vectors)
+- Transactional outbox pattern: PG-backed outbox replaces in-memory DLQ (survives crashes)
+- Externalized A2A tasks + agent registry + read-your-writes tracking to Redis/PG (multi-instance safe)
+- Adaptive semantic cache: per-collection thresholds, auto-detect query type (SQL/NL/RAG/agent)
+- Field encryption (AES-256-GCM) + audit logging wired into actual read/write data paths
+
+### Enterprise Features (P2)
+- Agent memory protocol: store/recall/forget/share with Ebbinghaus temporal decay
+- Memory types: episodic, semantic, working (Redis-cached)
+- 4 new MCP tools: memory.store, memory.recall, memory.forget, memory.share
+- GDPR-compliant deletion across all engines (PG + Qdrant + Redis)
+
+### Documentation
+- PhD Expert Panel evaluation (distributed systems, AI/ML, security specialists)
+- 20-item enhancement roadmap with expert attribution
+- Updated all documentation to reflect honest positioning
+
+### New Files
+- cortexdb/core/outbox_worker.py, outbox_schema.sql
+- cortexdb/core/cache_config.py
+- cortexdb/core/embedding_sync.py, embedding_sync_triggers.sql
+- cortexdb/core/agent_memory.py, agent_memory_schema.sql
+- cortexdb/a2a/a2a_tasks_schema.sql
+- docs/PHD-EVALUATION.md
+
+---
+
 ## [6.0.0] - 2026-03-08
 
 **Phase 12: Marketplace Ecosystem — 18 New Capabilities, SDKs, Full Platform**

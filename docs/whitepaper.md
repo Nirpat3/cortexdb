@@ -102,16 +102,21 @@ Every query passes through the same pipeline:
    ├── Query hint extraction (cache_first, skip_semantic)
    └── Parameterized query preparation
 
-4. READ CASCADE (5 tiers)
+4. READ CASCADE (5 tiers, adaptive thresholds)
    ├── R0: Process-local cache (< 0.1ms, 10K entries)
    ├── R1: Redis/MemoryCore (< 1ms)
-   ├── R2: Semantic cache via VectorCore (< 5ms, cosine > 0.95)
+   ├── R2: Semantic cache via VectorCore (< 5ms, adaptive cosine threshold)
+   │   ├── SQL queries: skip R2 (exact-match only, semantic cache not useful)
+   │   ├── Natural language queries: cosine > 0.87
+   │   └── RAG / retrieval queries: cosine > 0.85
    ├── R3: Persistent store via RelationalCore (< 50ms)
    └── R4: Deep retrieval (cross-engine merge)
 
-5. WRITE FAN-OUT
+5. WRITE FAN-OUT (Transactional Outbox)
    ├── Sync engines: ACID guarantee (Relational + Immutable)
-   ├── Async engines: Best-effort with 3x exponential retry
+   ├── Async engines: PG-backed transactional outbox (crash-safe)
+   │   └── Replaces in-memory DLQ — survives restarts, no lost writes
+   ├── Request coalescing: concurrent identical writes collapsed (prevents cache stampede)
    └── Cache invalidation: R0 + R1 + R2 cleared on write
 
 6. SYNAPTIC PLASTICITY
@@ -263,9 +268,92 @@ cortexgraph.attribution     → Campaign attribution
 
 ---
 
-## 5. Compliance Architecture
+## 5. Embedding Sync Pipeline
 
-### 5.1 Control Coverage
+The number one problem with hybrid relational + vector architectures is **stale embeddings**. When a row changes in PostgreSQL, the corresponding vector in Qdrant silently goes stale. Queries return semantically incorrect results with no error.
+
+CortexDB eliminates this with a fully automated embedding sync pipeline:
+
+```
+1. WRITE to RelationalCore (PostgreSQL)
+   └── PG trigger fires NOTIFY on cortexdb_embedding_sync channel
+
+2. LISTENER (async, always-on)
+   ├── Receives NOTIFY payload: {table, id, operation, tenant_id}
+   ├── Fetches updated row from RelationalCore
+   └── Routes to embedding pipeline
+
+3. EMBEDDING PIPELINE
+   ├── Unified embedding codepath (same model for writes + queries)
+   ├── Re-embeds changed fields using configured embedding model
+   └── Upserts new vector to Qdrant (VectorCore)
+
+4. RESULT
+   └── Vector search always reflects current relational state
+```
+
+Key properties:
+- **Zero-config**: Any table registered for vector search gets auto-sync
+- **Crash-safe**: Uses the transactional outbox — pending syncs survive restarts
+- **Consistent codepath**: Write-time and query-time embeddings use the same model, eliminating drift
+- **Tenant-aware**: Each tenant's vectors are synced to their isolated Qdrant collection
+
+This is CortexDB's answer to the consistency problem (Section 1.2): when data changes in one engine, all other engines converge automatically.
+
+---
+
+## 6. Agent Memory Protocol
+
+CortexDB provides a structured memory system for AI agents, exposed as MCP tools. Agents can **store**, **recall**, **forget**, and **share** memories with built-in cognitive decay.
+
+### 6.1 Memory Operations
+
+| Operation | Description | MCP Tool |
+|-----------|------------|----------|
+| **Store** | Persist a memory with importance score | `cortexdb.memory.store` |
+| **Recall** | Retrieve memories by semantic similarity | `cortexdb.memory.recall` |
+| **Forget** | Explicitly remove a memory | `cortexdb.memory.forget` |
+| **Share** | Make a memory accessible to other agents | `cortexdb.memory.share` |
+
+### 6.2 Ebbinghaus Decay Model
+
+Memories decay over time following an Ebbinghaus-inspired forgetting curve:
+
+```
+retention(t) = importance × e^(-λt)
+
+Where:
+  importance = initial weight (0.0–1.0), set at store time
+  λ = decay constant (configurable per agent/collection)
+  t = time elapsed since last access
+```
+
+High-importance memories decay slowly; low-importance memories fade. Each recall resets the decay timer (spaced repetition effect). The Sleep Cycle's nightly decay phase garbage-collects memories below the retention threshold.
+
+### 6.3 Multi-Agent Memory Sharing
+
+Agents can share memories via the `share` operation, which copies the memory into a shared collection accessible by target agents. Shared memories carry provenance metadata (source agent, timestamp, original importance) so receiving agents can assess trust.
+
+---
+
+## 7. Security Hardening
+
+Version 4.0 includes critical security fixes identified during expert evaluation:
+
+| Fix | Category | Detail |
+|-----|----------|--------|
+| RLS context injection | P0 | Changed `SET app.current_tenant` to `SET LOCAL` — scoped to transaction, prevents leakage across pooled connections |
+| Admin auth bypass | P0 | Admin endpoints now require authentication; previously accessible without credentials |
+| Field encryption in read/write paths | P1 | AES-256-GCM encryption wired directly into RelationalCore read/write — not a bolt-on layer |
+| A2A task externalization | P1 | Agent-to-agent tasks persisted to Redis + PostgreSQL with read-your-writes consistency (multi-instance safe) |
+| Unified embedding codepath | P1 | Single embedding model for both indexing and querying eliminates vector drift |
+| PostgreSQL-backed immutable ledger | P1 | Ledger entries stored in PostgreSQL with append-only triggers, replacing in-memory structure |
+
+---
+
+## 8. Compliance Architecture
+
+### 8.1 Control Coverage
 
 CortexDB maps 39 controls across 5 compliance frameworks to specific implementation features:
 
@@ -277,7 +365,7 @@ CortexDB maps 39 controls across 5 compliance frameworks to specific implementat
 | PCI DSS v4.0 | 8 | PAN tokenization, key management, secure development |
 | PA-DSS | 5 | Application logging, secure auth, testing |
 
-### 5.2 Encryption Architecture
+### 8.2 Encryption Architecture
 
 ```
 Master Key (KEK)
@@ -297,7 +385,7 @@ Field Classification:
   RESTRICTED   → PHI/PCI encryption (SSN, PAN, diagnoses)
 ```
 
-### 5.3 Audit Trail
+### 8.3 Audit Trail
 
 Every compliance-relevant action generates an immutable audit event:
 
@@ -325,9 +413,9 @@ Evidence reports generated per framework with retention policies:
 
 ---
 
-## 6. Multi-Tenancy
+## 9. Multi-Tenancy
 
-### 6.1 Isolation Model
+### 9.1 Isolation Model
 
 CortexDB implements defense-in-depth tenant isolation:
 
@@ -341,7 +429,7 @@ CortexDB implements defense-in-depth tenant isolation:
 | Stream | Channel prefix `tenant:{id}:` | Subscription isolation |
 | Encryption | Per-tenant DEK | Cryptographic isolation |
 
-### 6.2 Tenant Lifecycle
+### 9.2 Tenant Lifecycle
 
 ```
 ONBOARDING → ACTIVE → SUSPENDED → OFFBOARDING → PURGED
@@ -353,7 +441,7 @@ ONBOARDING → ACTIVE → SUSPENDED → OFFBOARDING → PURGED
      └── Provisioning
 ```
 
-### 6.3 Plan-Based Rate Limiting
+### 9.3 Plan-Based Rate Limiting
 
 | Plan | Queries/min | Writes/min | Agents | Endpoints/min |
 |------|------------|------------|--------|---------------|
@@ -364,9 +452,9 @@ ONBOARDING → ACTIVE → SUSPENDED → OFFBOARDING → PURGED
 
 ---
 
-## 7. Self-Healing Infrastructure
+## 10. Self-Healing Infrastructure
 
-### 7.1 Grid State Machine
+### 10.1 Grid State Machine
 
 Every node in the CortexDB grid follows a deterministic state machine:
 
@@ -380,7 +468,7 @@ SPAWNED → INITIALIZING → RUNNING ←→ WAITING
                               FAILED → RETIRED
 ```
 
-### 7.2 Health Scoring
+### 10.2 Health Scoring
 
 Composite health score (0-100) based on:
 - Heartbeat recency (25%)
@@ -391,7 +479,7 @@ Composite health score (0-100) based on:
 
 Classifications: PRISTINE (90+) → STABLE (70-89) → FLAKY (40-69) → CHRONIC (20-39) → TERMINAL (0-19)
 
-### 7.3 Sleep Cycle (Nightly Maintenance)
+### 10.3 Sleep Cycle (Nightly Maintenance)
 
 Six ordered tasks run during off-peak hours:
 
@@ -404,7 +492,7 @@ Six ordered tasks run during off-peak hours:
 
 ---
 
-## 8. Technology Stack
+## 11. Technology Stack
 
 | Component | Technology | Version |
 |-----------|-----------|---------|
@@ -421,11 +509,13 @@ Six ordered tasks run during off-peak hours:
 
 ---
 
-## 9. Conclusion
+## 12. Conclusion
 
 CortexDB v4.0 represents a paradigm shift in database architecture. By unifying seven database paradigms into one consciousness-inspired system, it eliminates data silos, reduces operational complexity by 7x, and provides native AI agent integration — all while meeting the strictest compliance requirements (FedRAMP, HIPAA, PCI-DSS) and scaling to petabytes via Citus distributed sharding.
 
 The database is not just a storage layer — it is an intelligent system that optimizes itself (AI indexing, synaptic plasticity), heals itself (grid repair, resurrection protocol), and understands its data (CortexGraph customer intelligence, semantic search, relationship traversal).
+
+Version 4.0's architecture has been validated through a **PhD expert panel evaluation** comprising three specialists in distributed systems, database internals, and AI/ML infrastructure. Their review confirmed the soundness of the embedding sync pipeline, transactional outbox pattern, and agent memory protocol, while driving the P0 security fixes (RLS scoping, admin auth) documented in Section 7.
 
 ---
 

@@ -2,6 +2,8 @@
 
 Thank you for your interest in contributing to CortexDB — an AI Agent Data Infrastructure layer that coordinates PostgreSQL, Redis, and Qdrant through a single API. CortexDB provides write fan-out, semantic caching, cross-engine queries, and agent-facing tool interfaces (MCP, A2A) on top of existing database engines.
 
+As of v6.1, CortexDB adds a transactional outbox for reliable write fan-out, an embedding sync pipeline, an agent memory protocol with MCP tools, adaptive semantic cache thresholds, field encryption wired into read/write paths, externalized A2A task storage, read-your-writes consistency via Redis, request coalescing, and a PostgreSQL-backed immutable ledger.
+
 ---
 
 ## Code of Conduct
@@ -72,11 +74,33 @@ cortexdb/
 │   ├── grid/              # Self-healing grid
 │   ├── heartbeat/         # Health monitoring
 │   ├── asa/               # Standards enforcement
-│   └── observability/     # Tracing + metrics
+│   ├── observability/     # Tracing + metrics
+│   └── core/
+│       ├── outbox_worker.py      # Transactional outbox dispatcher
+│       ├── embedding_sync.py     # Embedding sync pipeline worker
+│       ├── cache_config.py       # Adaptive cache threshold config
+│       ├── cache_invalidation.py # Cache invalidation logic
+│       ├── embedding.py          # Unified embedding service
+│       └── sleep_cycle.py        # Background maintenance cycles
+├── cortexdb/mcp/
+│   └── agent_memory.py    # Agent memory protocol (store/recall/forget/share)
 ├── init-scripts/          # SQL schema files
+│   ├── outbox_schema.sql          # Transactional outbox table
+│   ├── embedding_sync_triggers.sql # Embedding sync triggers
+│   ├── agent_memory_schema.sql    # Agent memory tables
+│   └── a2a_tasks_schema.sql       # Externalized A2A task storage
 ├── docs/                  # Documentation
+│   └── PHD-EVALUATION.md  # PhD expert evaluation of architecture
 └── tests/                 # Test suite
 ```
+
+---
+
+## Architecture Reference
+
+For an in-depth analysis of CortexDB's architecture, design trade-offs, and recommendations,
+see [docs/PHD-EVALUATION.md](docs/PHD-EVALUATION.md). This document provides a PhD-level
+expert evaluation and is useful context before making significant architectural contributions.
 
 ---
 
