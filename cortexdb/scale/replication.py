@@ -84,12 +84,13 @@ class ReplicaRouter:
     WRITER_STICKY_SEC = 5.0     # Read-your-writes window
     MAX_RECENT_WRITERS = 10000  # Bounded size for memory safety
 
-    def __init__(self, engines: Dict[str, Any] = None):
+    def __init__(self, engines: Dict[str, Any] = None, redis=None):
         self.engines = engines or {}
+        self._redis = redis  # Shared Redis for cross-instance read-your-writes tracking
         self._primary: Optional[ReplicaNode] = None
         self._replicas: List[ReplicaNode] = []
         self._round_robin_idx = 0
-        self._recent_writers: Dict[str, float] = {}  # tenant_id -> last_write_time
+        self._recent_writers: Dict[str, float] = {}  # tenant_id -> last_write_time (fallback)
         self._query_count = 0
         self._read_from_primary = 0
         self._read_from_replica = 0
@@ -120,6 +121,40 @@ class ReplicaRouter:
         host = host_part.split(":")[0]
         port = int(host_part.split(":")[1]) if ":" in host_part else 5432
         return ReplicaNode(host=host, port=port, role=role)
+
+    async def record_write(self, tenant_id: str):
+        """Record a write for read-your-writes tracking (Redis-backed)."""
+        if self._redis:
+            try:
+                await self._redis.set(
+                    f"ryw:{tenant_id}", "1",
+                    ex=int(self.WRITER_STICKY_SEC))
+                return
+            except Exception as e:
+                logger.warning(f"Redis record_write failed, using in-memory: {e}")
+        # Fallback: in-memory
+        now = time.time()
+        if len(self._recent_writers) >= self.MAX_RECENT_WRITERS:
+            self._cleanup_recent_writers(now)
+            if len(self._recent_writers) >= self.MAX_RECENT_WRITERS:
+                oldest = min(self._recent_writers, key=self._recent_writers.get)
+                del self._recent_writers[oldest]
+        self._recent_writers[tenant_id] = now
+
+    async def should_route_to_primary(self, tenant_id: str) -> bool:
+        """Check if a tenant's reads should go to primary (read-your-writes)."""
+        if self._redis:
+            try:
+                return bool(await self._redis.exists(f"ryw:{tenant_id}"))
+            except Exception as e:
+                logger.warning(f"Redis should_route_to_primary failed, using in-memory: {e}")
+        # Fallback: in-memory
+        ts = self._recent_writers.get(tenant_id)
+        if ts and (time.time() - ts) < self.WRITER_STICKY_SEC:
+            return True
+        if ts:
+            del self._recent_writers[tenant_id]
+        return False
 
     def route(self, query: str, tenant_id: Optional[str] = None,
               force: Optional[ReadWriteSplit] = None) -> ReplicaNode:

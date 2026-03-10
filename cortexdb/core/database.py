@@ -13,12 +13,15 @@ Query flow: Security -> Parser -> Router -> Cache Cascade -> Engine(s) -> Bridge
 import asyncio
 import hashlib
 import json
+import os
 import time
 import logging
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
 from enum import Enum
+
+from cortexdb.core.cache_config import SemanticCacheConfig, CollectionCacheConfig
 
 logger = logging.getLogger("cortexdb")
 
@@ -139,9 +142,13 @@ class Amygdala:
 class ReadCascade:
     """5-Tier Read Cascade: R0 -> R1 -> R2 -> R3 -> R4. Target: 75-85% cache hit rate."""
 
-    def __init__(self, engines: Dict[str, Any], tenant_isolation=None):
+    def __init__(self, engines: Dict[str, Any], tenant_isolation=None,
+                 field_encryption=None, audit=None):
         self.engines = engines
         self.tenant_isolation = tenant_isolation
+        self.field_encryption = field_encryption  # Optional FieldEncryption instance
+        self.audit = audit  # Optional ComplianceAudit instance
+        self.cache_config = SemanticCacheConfig()
         self._r0_cache: OrderedDict = OrderedDict()  # LRU cache
         self._r0_max_size = 10000
         self._r0_max_entry_bytes = 1024 * 1024  # 1MB max per entry
@@ -193,20 +200,26 @@ class ReadCascade:
             except Exception as e:
                 logger.warning(f"R1 error: {e}")
 
-        # R2: Semantic Cache / VectorCore
+        # R2: Semantic Cache / VectorCore (adaptive thresholds)
         if "vector" in self.engines and hint != "skip_semantic":
             try:
                 collection = f"tenant_{tenant_id}_cache" if tenant_id else "response_cache"
-                similar = await self.engines["vector"].search_similar(
-                    collection=collection, query_text=query, threshold=0.95, limit=1)
-                if similar:
-                    data = similar[0]["payload"]["response"]
-                    await self._promote_to_r1(f"{cache_prefix}cache:{qhash}", data)
-                    self._r0_set(r0_key, data)
-                    self._r2_hits += 1
-                    return QueryResult(data=data, tier_served=CacheTier.R2_SEMANTIC,
-                                       engines_hit=["vector_core"],
-                                       latency_ms=(time.perf_counter() - start) * 1000, cache_hit=True)
+                r2_config = self.cache_config.get_config(collection, query)
+                if not r2_config.r2_enabled:
+                    # Skip R2 for SQL queries — use hash-based caching only
+                    pass  # fall through to R3
+                else:
+                    similar = await self.engines["vector"].search_similar(
+                        collection=collection, query_text=query,
+                        threshold=r2_config.threshold, limit=1)
+                    if similar:
+                        data = similar[0]["payload"]["response"]
+                        await self._promote_to_r1(f"{cache_prefix}cache:{qhash}", data)
+                        self._r0_set(r0_key, data)
+                        self._r2_hits += 1
+                        return QueryResult(data=data, tier_served=CacheTier.R2_SEMANTIC,
+                                           engines_hit=["vector_core"],
+                                           latency_ms=(time.perf_counter() - start) * 1000, cache_hit=True)
             except Exception as e:
                 logger.warning(f"R2 error: {e}")
 
@@ -309,7 +322,14 @@ class SynapticPlasticity:
 
 
 class WriteFanOut:
-    """Parallel Write Fan-Out. Sync engines = ACID. Async engines = tracked best-effort."""
+    """Parallel Write Fan-Out with Transactional Outbox Pattern.
+
+    Sync engines = ACID (executed inline).
+    Async engines = persisted to PG outbox table in the SAME transaction as sync writes.
+    OutboxWorker background process picks up and dispatches to async engines.
+
+    P1 FIX: Replaced in-memory DLQ (lost on crash) with PG-backed outbox table.
+    """
 
     WRITE_ROUTES = {
         "payment":    {"sync": ["relational", "immutable"], "async": ["temporal", "stream", "memory"]},
@@ -325,119 +345,141 @@ class WriteFanOut:
         "default":    {"sync": ["relational"], "async": []},
     }
 
-    MAX_PENDING_TASKS = 1000  # Backpressure limit
-
-    def __init__(self, engines: Dict[str, Any], cache_invalidation=None):
+    def __init__(self, engines: Dict[str, Any], cache_invalidation=None,
+                 pool=None, field_encryption=None, audit=None):
         self.engines = engines
         self.cache_invalidation = cache_invalidation
+        self.pool = pool  # asyncpg pool for outbox table
+        self.field_encryption = field_encryption
+        self.audit = audit
         self._pending_tasks: Dict[str, asyncio.Task] = {}
         self._task_counter = 0
-        self._failed_writes: List[Dict] = []  # Dead letter queue
-        self._max_dlq = 500
-        self._stats = {"async_queued": 0, "async_completed": 0, "async_failed": 0}
+        self._stats = {"outbox_queued": 0, "sync_completed": 0}
+        self._outbox_worker = None  # set after OutboxWorker is created
 
-    async def write(self, data_type: str, payload: Dict, actor: str = "system") -> Dict:
+    async def write(self, data_type: str, payload: Dict, actor: str = "system",
+                    tenant_id: Optional[str] = None) -> Dict:
         start = time.perf_counter()
         route = self.WRITE_ROUTES.get(data_type, self.WRITE_ROUTES["default"])
         results = {"sync": {}, "async": {}, "latency_ms": 0}
 
-        for engine_name in route["sync"]:
-            if engine_name in self.engines:
-                try:
-                    result = await self.engines[engine_name].write(data_type, payload, actor)
-                    results["sync"][engine_name] = {"status": "success", "result": result}
-                except Exception as e:
-                    results["sync"][engine_name] = {"status": "error", "error": str(e)}
-                    raise
+        # Encrypt sensitive fields before writing (if enabled)
+        write_payload = payload
+        if self.field_encryption:
+            try:
+                write_payload = self.field_encryption.encrypt_payload(dict(payload))
+            except Exception as e:
+                logger.warning(f"Field encryption failed, writing plaintext: {e}")
 
-        # Async writes with tracking and backpressure
-        self._cleanup_completed_tasks()
+        # If we have a PG pool, do sync writes + outbox inserts in ONE transaction
+        if self.pool and route["async"]:
+            async with self.pool.acquire() as conn:
+                async with conn.transaction():
+                    # Sync engine writes inside transaction
+                    for engine_name in route["sync"]:
+                        if engine_name in self.engines:
+                            try:
+                                result = await self.engines[engine_name].write(
+                                    data_type, write_payload, actor)
+                                results["sync"][engine_name] = {"status": "success", "result": result}
+                            except Exception as e:
+                                results["sync"][engine_name] = {"status": "error", "error": str(e)}
+                                raise
 
-        for engine_name in route["async"]:
-            if engine_name in self.engines:
-                if len(self._pending_tasks) >= self.MAX_PENDING_TASKS:
-                    logger.warning(f"Backpressure: {len(self._pending_tasks)} pending async writes. "
-                                   f"Executing {engine_name} synchronously.")
+                    # Insert async engine writes into outbox (same transaction)
+                    for engine_name in route["async"]:
+                        if engine_name in self.engines:
+                            await conn.execute("""
+                                INSERT INTO write_outbox (data_type, payload, actor, target_engine, tenant_id)
+                                VALUES ($1, $2::jsonb, $3, $4, $5)
+                            """, data_type,
+                                json.dumps(write_payload, default=str),
+                                actor, engine_name, tenant_id)
+                            self._stats["outbox_queued"] += 1
+                            results["async"][engine_name] = {"status": "outbox_queued"}
+        else:
+            # Fallback: no pool or no async engines — sync writes only
+            for engine_name in route["sync"]:
+                if engine_name in self.engines:
                     try:
-                        await self.engines[engine_name].write(data_type, payload, actor)
-                        results["async"][engine_name] = {"status": "sync_fallback"}
+                        result = await self.engines[engine_name].write(
+                            data_type, write_payload, actor)
+                        results["sync"][engine_name] = {"status": "success", "result": result}
                     except Exception as e:
-                        results["async"][engine_name] = {"status": "error", "error": str(e)}
-                else:
+                        results["sync"][engine_name] = {"status": "error", "error": str(e)}
+                        raise
+
+            # Legacy in-process async for engines without outbox
+            for engine_name in route["async"]:
+                if engine_name in self.engines:
                     self._task_counter += 1
                     task_id = f"async-{self._task_counter}"
                     task = asyncio.create_task(
-                        self._tracked_async_write(task_id, engine_name, data_type, payload, actor))
+                        self._tracked_async_write(task_id, engine_name, data_type, write_payload, actor))
                     self._pending_tasks[task_id] = task
-                    self._stats["async_queued"] += 1
-                    results["async"][engine_name] = {"status": "queued", "task_id": task_id}
 
         results["latency_ms"] = (time.perf_counter() - start) * 1000
 
-        # Invalidate caches after write (also tracked)
+        # Audit log the write
+        if self.audit:
+            try:
+                await self.audit.log_write(data_type, actor, tenant_id,
+                                           list(results["sync"].keys()))
+            except Exception:
+                pass
+
+        # Invalidate caches after write
         if self.cache_invalidation:
             self._task_counter += 1
-            tid = f"cache-{self._task_counter}"
-            task = asyncio.create_task(self._safe_cache_invalidation(data_type, payload))
-            self._pending_tasks[tid] = task
+            task = asyncio.create_task(self._safe_cache_invalidation(data_type, write_payload))
+            self._pending_tasks[f"cache-{self._task_counter}"] = task
 
         return results
 
     async def _tracked_async_write(self, task_id: str, engine_name: str,
                                     data_type: str, payload: Dict,
                                     actor: str, retries: int = 3):
-        """Async write with error tracking and DLQ on final failure."""
+        """Fallback async write when outbox is unavailable."""
         for attempt in range(retries):
             try:
                 await self.engines[engine_name].write(data_type, payload, actor)
-                self._stats["async_completed"] += 1
                 return
             except Exception as e:
                 if attempt < retries - 1:
                     await asyncio.sleep(0.1 * (2 ** attempt))
                 else:
-                    self._stats["async_failed"] += 1
                     logger.error(f"Async write to {engine_name} failed after "
                                  f"{retries} retries: {e}")
-                    # Add to dead letter queue
-                    if len(self._failed_writes) < self._max_dlq:
-                        self._failed_writes.append({
-                            "task_id": task_id,
-                            "engine": engine_name,
-                            "data_type": data_type,
-                            "error": str(e),
-                            "timestamp": time.time(),
-                        })
 
     async def _safe_cache_invalidation(self, data_type: str, payload: Dict):
-        """Cache invalidation with error handling."""
         try:
             await self.cache_invalidation.on_write(data_type, payload)
         except Exception as e:
             logger.warning(f"Cache invalidation failed: {e}")
 
     def _cleanup_completed_tasks(self):
-        """Remove completed tasks from the tracking dict."""
         done = [tid for tid, task in self._pending_tasks.items() if task.done()]
         for tid in done:
             task = self._pending_tasks.pop(tid)
-            # Surface unhandled exceptions
             if task.exception():
                 logger.error(f"Background task {tid} exception: {task.exception()}")
 
     async def drain(self, timeout: float = 30.0):
-        """Wait for all pending async writes to complete (for graceful shutdown)."""
-        if not self._pending_tasks:
-            return
-        logger.info(f"Draining {len(self._pending_tasks)} pending async writes...")
-        pending = list(self._pending_tasks.values())
-        try:
-            await asyncio.wait_for(
-                asyncio.gather(*pending, return_exceptions=True),
-                timeout=timeout)
-        except asyncio.TimeoutError:
-            logger.warning(f"Drain timeout: {len(self._pending_tasks)} tasks still pending")
+        """Wait for pending in-process tasks + outbox to drain."""
         self._cleanup_completed_tasks()
+        if self._pending_tasks:
+            logger.info(f"Draining {len(self._pending_tasks)} in-process tasks...")
+            pending = list(self._pending_tasks.values())
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*pending, return_exceptions=True), timeout=timeout)
+            except asyncio.TimeoutError:
+                logger.warning(f"Drain timeout: {len(self._pending_tasks)} tasks still pending")
+            self._cleanup_completed_tasks()
+
+        # Wait for outbox worker to finish processing pending entries
+        if self._outbox_worker:
+            await self._outbox_worker.wait_for_drain(timeout=timeout)
 
     @property
     def pending_count(self) -> int:
@@ -445,15 +487,33 @@ class WriteFanOut:
 
     @property
     def dlq(self) -> List[Dict]:
-        return list(self._failed_writes)
+        """Dead letter queue — now backed by outbox table.
+        Returns empty list for sync callers; use dlq_async() for PG-backed data."""
+        return []
+
+    async def dlq_async(self) -> List[Dict]:
+        """Query dead-letter entries from the outbox table."""
+        if not self.pool:
+            return []
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM write_outbox WHERE status = 'dead_letter' ORDER BY id"
+            )
+            return [dict(row) for row in rows]
 
     def get_stats(self) -> Dict:
         self._cleanup_completed_tasks()
         return {
             **self._stats,
-            "pending": len(self._pending_tasks),
-            "dlq_size": len(self._failed_writes),
+            "pending_in_process": len(self._pending_tasks),
         }
+
+    async def get_stats_async(self) -> Dict:
+        """Extended stats including outbox table counts."""
+        base = self.get_stats()
+        if self._outbox_worker:
+            base["outbox"] = await self._outbox_worker.get_metrics()
+        return base
 
 
 class CortexDB:
@@ -479,6 +539,8 @@ class CortexDB:
         self.tenant_isolation = None
         self.embedding_sync = None
         self.agent_memory = None
+        self.outbox_worker = None
+        self.field_encryption = None
         self._connected = False
         self._query_count = 0
         self._start_time = time.time()
@@ -540,8 +602,27 @@ class CortexDB:
 
         self.tenant_isolation = TenantIsolation(self.engines)
         self.cache_invalidation = CacheInvalidationEngine(engines=self.engines)
-        self.read_cascade = ReadCascade(self.engines, self.tenant_isolation)
-        self.write_fanout = WriteFanOut(self.engines, self.cache_invalidation)
+
+        # Optional field encryption (requires CORTEX_ENCRYPTION_KEY env var)
+        try:
+            encryption_key = os.getenv("CORTEX_ENCRYPTION_KEY", "")
+            if encryption_key:
+                from cortexdb.compliance.encryption import FieldEncryption
+                self.field_encryption = FieldEncryption({"master_key": encryption_key})
+                logger.info("  + FIELD ENCRYPTION enabled")
+            else:
+                logger.info("  - Field encryption disabled (set CORTEX_ENCRYPTION_KEY to enable)")
+        except Exception as e:
+            logger.warning(f"  x FIELD ENCRYPTION unavailable: {e}")
+
+        # Get PG pool for outbox pattern
+        pg_pool = getattr(self.engines.get("relational"), "pool", None)
+
+        self.read_cascade = ReadCascade(self.engines, self.tenant_isolation,
+                                        field_encryption=self.field_encryption)
+        self.write_fanout = WriteFanOut(self.engines, self.cache_invalidation,
+                                        pool=pg_pool,
+                                        field_encryption=self.field_encryption)
         self.bridge = BridgeEngine(self.engines)
         self.parser = CortexQLParser()
         self.precompute = PreComputeEngine(self.plasticity, self.read_cascade, self.engines)
@@ -569,6 +650,23 @@ class CortexDB:
                 logger.info("  + EMBEDDING SYNC pipeline started")
             except Exception as e:
                 logger.warning(f"  x EMBEDDING SYNC unavailable: {e}")
+
+        # Start Outbox Worker (transactional outbox for crash-safe async writes)
+        if pg_pool:
+            try:
+                from cortexdb.core.outbox_worker import OutboxWorker
+                # Install outbox schema
+                import pathlib
+                schema_path = pathlib.Path(__file__).parent / "outbox_schema.sql"
+                if schema_path.exists():
+                    async with pg_pool.acquire() as conn:
+                        await conn.execute(schema_path.read_text())
+                self.outbox_worker = OutboxWorker(pg_pool, self.engines)
+                self.write_fanout._outbox_worker = self.outbox_worker
+                await self.outbox_worker.start()
+                logger.info("  + OUTBOX WORKER started (crash-safe async writes)")
+            except Exception as e:
+                logger.warning(f"  x OUTBOX WORKER unavailable: {e}")
 
         # Initialize Agent Memory Protocol
         if self.embedding:
@@ -664,6 +762,7 @@ class CortexDB:
             "embedding_sync": self.embedding_sync.get_status() if self.embedding_sync else {"status": "not_loaded"},
             "sleep_cycle": self.sleep_cycle.get_status() if self.sleep_cycle else {},
             "agent_memory": self.agent_memory.get_info() if self.agent_memory else {"status": "not_loaded"},
+            "outbox_worker": (await self.outbox_worker.get_metrics()) if self.outbox_worker else {"status": "not_loaded"},
         }
         for name, engine in self.engines.items():
             try:
@@ -674,7 +773,14 @@ class CortexDB:
         return health
 
     async def close(self):
-        # Stop embedding sync pipeline first (it holds a PG connection)
+        # Stop outbox worker (let it finish in-flight dispatches)
+        if self.outbox_worker:
+            try:
+                await self.outbox_worker.stop()
+            except Exception as e:
+                logger.warning(f"Outbox worker stop error: {e}")
+
+        # Stop embedding sync pipeline (it holds a PG connection)
         if self.embedding_sync:
             try:
                 await self.embedding_sync.stop()

@@ -19,6 +19,7 @@ from typing import Any, Dict, Optional, List
 from contextlib import asynccontextmanager
 
 from cortexdb.core.database import CortexDB
+from cortexdb.core.cache_config import CollectionCacheConfig
 from cortexdb.grid import (NodeStateMachine, RepairEngine, GridGarbageCollector,
                             GridHealthScorer, GridCoroner, ResurrectionProtocol)
 from cortexdb.heartbeat import HeartbeatProtocol, HealthCheckRunner
@@ -123,9 +124,12 @@ async def lifespan(app: FastAPI):
     # MCP Server
     mcp_server = CortexMCPServer(db)
 
-    # A2A
-    a2a_registry = A2ARegistry(db.engines)
-    a2a_protocol = A2AProtocol(a2a_registry, db.engines)
+    # A2A — pass Redis + PG pool for cross-instance state sharing
+    _redis_client = db.engines["memory"].client if "memory" in db.engines else None
+    _pg_pool = db.engines["relational"].pool if "relational" in db.engines else None
+    a2a_registry = A2ARegistry(db.engines, redis=_redis_client)
+    a2a_protocol = A2AProtocol(a2a_registry, db.engines,
+                                redis=_redis_client, pool=_pg_pool)
 
     # CortexGraph (DOC-020)
     embedding_pipeline = db.embedding if hasattr(db, 'embedding') else None
@@ -144,7 +148,7 @@ async def lifespan(app: FastAPI):
 
     # Scale: Sharding, Replication, AI Indexing, Rendering
     shard_mgr = CitusShardManager(db.engines)
-    replica_router = ReplicaRouter(db.engines)
+    replica_router = ReplicaRouter(db.engines, redis=_redis_client)
     ai_index = AIIndexManager(db.engines)
     data_renderer = DataRenderer(db.engines)
 
@@ -381,6 +385,53 @@ async def run_sleep_cycle():
 @app.get("/admin/sleep-cycle/status")
 async def sleep_cycle_status():
     return db.sleep_cycle.get_status() if db and db.sleep_cycle else {}
+
+
+@app.post("/admin/cache/config")
+async def set_cache_config(request: Request):
+    """Configure per-collection semantic cache thresholds.
+
+    Body JSON fields:
+      - collection (str, required): Collection name to configure
+      - threshold (float, optional): Cosine similarity threshold (default 0.88)
+      - r2_enabled (bool, optional): Enable/disable R2 semantic cache (default True)
+      - ttl_seconds (int, optional): Cache entry TTL in seconds (default 3600)
+      - negative_cache (bool, optional): Cache empty results (default False)
+      - max_entries (int, optional): Max cached entries (default 10000)
+    """
+    if not db or not db.read_cascade:
+        raise HTTPException(503, "CortexDB not initialized")
+    body = await request.json()
+    collection = body.get("collection")
+    if not collection or not isinstance(collection, str):
+        raise HTTPException(400, "collection (string) is required")
+    config = CollectionCacheConfig(
+        threshold=float(body.get("threshold", 0.88)),
+        r2_enabled=bool(body.get("r2_enabled", True)),
+        ttl_seconds=int(body.get("ttl_seconds", 3600)),
+        negative_cache=bool(body.get("negative_cache", False)),
+        max_entries=int(body.get("max_entries", 10000)),
+    )
+    db.read_cascade.cache_config.set_collection_config(collection, config)
+    return {
+        "status": "ok",
+        "collection": collection,
+        "config": {
+            "threshold": config.threshold,
+            "r2_enabled": config.r2_enabled,
+            "ttl_seconds": config.ttl_seconds,
+            "negative_cache": config.negative_cache,
+            "max_entries": config.max_entries,
+        },
+    }
+
+
+@app.get("/admin/cache/config")
+async def get_cache_config():
+    """Get current semantic cache configuration."""
+    if not db or not db.read_cascade:
+        raise HTTPException(503, "CortexDB not initialized")
+    return db.read_cascade.cache_config.to_dict()
 
 
 # -- Tenant Endpoints (DOC-019 Section 6) --
