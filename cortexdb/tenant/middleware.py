@@ -3,7 +3,9 @@
 Every request: Authorization: Bearer ctx_live_... -> resolve tenant -> set RLS context.
 """
 
+import hmac
 import logging
+import os
 from contextvars import ContextVar
 from typing import Optional
 
@@ -59,17 +61,16 @@ class TenantMiddleware(BaseHTTPMiddleware):
         # Admin paths require admin auth token
         if path.startswith("/admin/") or path.startswith("/v1/admin/") or \
            path.endswith("/rotate-keys") or path.endswith("/purge"):
-            import os, hashlib
             admin_token = os.environ.get("CORTEX_ADMIN_TOKEN", "")
-            provided = request.headers.get("X-Admin-Token", "")
             if not admin_token:
-                # No admin token configured — require Authorization header
-                auth = request.headers.get("Authorization", "")
-                if not auth.startswith("Bearer "):
-                    return JSONResponse(status_code=401, content={
-                        "error": "admin_auth_required",
-                        "message": "Admin endpoints require X-Admin-Token header"})
-            elif not provided or hashlib.sha256(provided.encode()).hexdigest() != hashlib.sha256(admin_token.encode()).hexdigest():
+                # P0 FIX: Deny ALL admin requests when token is not configured.
+                # Previously fell through to granting admin access to any Bearer token.
+                logger.error("Admin endpoint accessed but CORTEX_ADMIN_TOKEN is not set. Denying.")
+                return JSONResponse(status_code=503, content={
+                    "error": "admin_not_configured",
+                    "message": "Admin endpoints are disabled. Set CORTEX_ADMIN_TOKEN to enable."})
+            provided = request.headers.get("X-Admin-Token", "")
+            if not provided or not hmac.compare_digest(provided, admin_token):
                 return JSONResponse(status_code=403, content={
                     "error": "forbidden", "message": "Invalid admin token"})
             set_current_tenant("__admin__")

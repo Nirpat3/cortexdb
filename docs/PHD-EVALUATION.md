@@ -325,12 +325,12 @@ The compliance `_check_evidence()` returns `True` as default for unknown evidenc
 
 | # | Enhancement | Expert Source | Status |
 |---|-------------|--------------|--------|
-| 1 | Fix RLS: SET LOCAL + remove NULL bypass | Security, Distributed | Implementing |
-| 2 | Fix admin auth bypass (deny when token unset) | Security | Planned |
+| 1 | Fix RLS: SET LOCAL + remove NULL bypass | Security, Distributed | Implemented |
+| 2 | Fix admin auth bypass (deny when token unset) | Security | Implemented |
 | 3 | Drop file-based immutable engine | Original eval | Implemented |
-| 4 | Load tenants from PostgreSQL on startup | Original eval | Implementing |
-| 5 | Unify dual embedding codepaths | AI/ML | Planned |
-| 6 | Request coalescing in read cascade | Original eval | Implementing |
+| 4 | Load tenants from PostgreSQL on startup | Original eval | Implemented |
+| 5 | Unify dual embedding codepaths | AI/ML | Implemented |
+| 6 | Request coalescing in read cascade | Original eval | Implemented |
 
 ### Short-Term (P1) — First Production Release
 

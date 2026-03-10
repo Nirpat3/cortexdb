@@ -1,11 +1,18 @@
 """VectorCore — Semantic Search Engine
 Similarity search via Qdrant. Powers the R2 semantic cache
-and agent/document embedding search."""
+and agent/document embedding search.
+
+P0 FIX: Unified embedding codepath. Previously had an incompatible hash-based
+fallback that produced different vectors than EmbeddingPipeline for the same
+input (byte-mapping vs struct.unpack). Now delegates all embedding to
+EmbeddingPipeline as the single source of truth.
+"""
 
 import hashlib
 import logging
 from typing import Any, Dict, List, Optional
 from cortexdb.engines import BaseEngine
+from cortexdb.core.embedding import EmbeddingPipeline
 
 logger = logging.getLogger("cortexdb.engines.vector")
 
@@ -15,50 +22,23 @@ try:
 except ImportError:
     AsyncQdrantClient = None
 
-# Lightweight embedding: hash-based vector for deterministic similarity.
-# Swap for sentence-transformers in production for true semantic search.
-VECTOR_DIM = 384
+# Single embedding pipeline instance — shared across all vector operations
+_embedding_pipeline: Optional[EmbeddingPipeline] = None
 
-_transformer_model = None
-
-
-def _load_transformer():
-    """Lazy-load sentence-transformers model if available."""
-    global _transformer_model
-    if _transformer_model is not None:
-        return _transformer_model
-    try:
-        from sentence_transformers import SentenceTransformer
-        _transformer_model = SentenceTransformer("all-MiniLM-L6-v2")
-        logger.info("Loaded sentence-transformers model: all-MiniLM-L6-v2")
-        return _transformer_model
-    except ImportError:
-        _transformer_model = False  # Mark as unavailable
-        return False
+VECTOR_DIM = EmbeddingPipeline.EMBEDDING_DIM  # 384
 
 
-def _hash_embed(text: str) -> List[float]:
-    """Deterministic hash-based embedding (fallback when no ML model).
-
-    Produces a consistent 384-dim vector from text via iterative SHA-256.
-    Not semantically meaningful, but enables exact-match and near-duplicate
-    detection in the vector cache.
-    """
-    vector = []
-    for i in range(0, VECTOR_DIM, 8):
-        chunk_hash = hashlib.sha256(f"{text}:{i}".encode()).digest()
-        for j in range(min(8, VECTOR_DIM - i)):
-            # Map byte to [-1, 1] range
-            vector.append((chunk_hash[j] - 128) / 128.0)
-    return vector[:VECTOR_DIM]
+def _get_pipeline() -> EmbeddingPipeline:
+    """Get or create the shared EmbeddingPipeline instance."""
+    global _embedding_pipeline
+    if _embedding_pipeline is None:
+        _embedding_pipeline = EmbeddingPipeline()
+    return _embedding_pipeline
 
 
 def embed_text(text: str) -> List[float]:
-    """Embed text into a vector. Uses ML model if available, else hash fallback."""
-    model = _load_transformer()
-    if model and model is not False:
-        return model.encode(text).tolist()
-    return _hash_embed(text)
+    """Embed text into a vector via the unified EmbeddingPipeline."""
+    return _get_pipeline().embed(text)
 
 
 class VectorEngine(BaseEngine):
