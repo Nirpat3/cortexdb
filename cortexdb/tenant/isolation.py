@@ -22,13 +22,32 @@ class TenantIsolation:
 
     # -- RelationalCore: PostgreSQL Row-Level Security --
 
-    async def set_rls_context(self, tenant_id: str):
-        """SET app.current_tenant for PostgreSQL RLS policies."""
+    async def set_rls_context(self, tenant_id: str, conn=None):
+        """SET LOCAL app.current_tenant for PostgreSQL RLS policies.
+
+        SECURITY: Must use SET LOCAL (not SET) so the tenant context is scoped
+        to the current transaction only. With connection pooling, a plain SET
+        persists on the session and bleeds the tenant context to the next
+        request that reuses the pooled connection.
+
+        If a connection is provided, uses it directly (caller must wrap in a
+        transaction). Otherwise acquires from the pool inside a transaction.
+        """
         if "relational" not in self.engines:
             return
         try:
-            await self.engines["relational"].execute(
-                "SET app.current_tenant = $1", [tenant_id])
+            if conn is not None:
+                # Caller-managed transaction — just set the local variable
+                await conn.execute(
+                    "SET LOCAL app.current_tenant = $1", tenant_id)
+            else:
+                # Acquire our own connection and wrap in a transaction so
+                # SET LOCAL has the required transaction context.
+                pool = self.engines["relational"].pool
+                async with pool.acquire() as c:
+                    async with c.transaction():
+                        await c.execute(
+                            "SET LOCAL app.current_tenant = $1", tenant_id)
         except Exception as e:
             logger.error(f"Failed to set RLS context for {tenant_id}: {e}")
             raise

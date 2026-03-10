@@ -61,12 +61,69 @@ class Tenant:
 
 
 class TenantManager:
-    """Manages tenant lifecycle: onboard, activate, suspend, offboard, purge."""
+    """Manages tenant lifecycle: onboard, activate, suspend, offboard, purge.
+
+    P0 FIX: Tenants are persisted to and loaded from the PostgreSQL `tenants`
+    table. The in-memory dict is a write-through cache for fast O(1) lookups.
+    """
 
     def __init__(self, engines: Dict[str, Any] = None):
         self.engines = engines or {}
         self._tenants: Dict[str, Tenant] = {}
         self._api_key_index: Dict[str, str] = {}  # api_key_hash -> tenant_id
+
+    async def load_from_db(self):
+        """Load all tenants from PostgreSQL into the in-memory cache.
+
+        Called on startup / after connect so tenants survive restarts.
+        """
+        if "relational" not in self.engines:
+            logger.warning("No relational engine — tenants will not persist across restarts")
+            return
+
+        try:
+            rows = await self.engines["relational"].execute(
+                "SELECT tenant_id, name, plan, status, api_key_hash, "
+                "config, rate_limits, metadata, "
+                "EXTRACT(EPOCH FROM created_at) AS created_epoch, "
+                "EXTRACT(EPOCH FROM activated_at) AS activated_epoch "
+                "FROM tenants WHERE status != 'purged'", None)
+
+            for row in (rows or []):
+                plan = TenantPlan(row["plan"])
+                status = TenantStatus(row["status"])
+                config = row.get("config") or {}
+                if isinstance(config, str):
+                    import json as _json
+                    config = _json.loads(config)
+                rate_limits = row.get("rate_limits") or {}
+                if isinstance(rate_limits, str):
+                    import json as _json
+                    rate_limits = _json.loads(rate_limits)
+                metadata = row.get("metadata") or {}
+                if isinstance(metadata, str):
+                    import json as _json
+                    metadata = _json.loads(metadata)
+
+                tenant = Tenant(
+                    tenant_id=row["tenant_id"],
+                    name=row["name"],
+                    plan=plan,
+                    status=status,
+                    api_key_hash=row.get("api_key_hash", ""),
+                    config=config,
+                    rate_limits=rate_limits,
+                    created_at=float(row["created_epoch"]) if row.get("created_epoch") else time.time(),
+                    activated_at=float(row["activated_epoch"]) if row.get("activated_epoch") else None,
+                    metadata=metadata,
+                )
+                self._tenants[tenant.tenant_id] = tenant
+                if tenant.api_key_hash:
+                    self._api_key_index[tenant.api_key_hash] = tenant.tenant_id
+
+            logger.info(f"Loaded {len(rows or [])} tenants from PostgreSQL")
+        except Exception as e:
+            logger.error(f"Failed to load tenants from DB: {e}")
 
     @staticmethod
     def _hash_api_key(api_key: str) -> str:
@@ -93,16 +150,9 @@ class TenantManager:
             rate_limits=PLAN_RATE_LIMITS.get(plan, {}),
         )
 
-        # Step 1: Store tenant record
-        self._tenants[tenant_id] = tenant
-        self._api_key_index[api_key_hash] = tenant_id
-
-        # Step 2: Create tenant-specific resources
-        await self._create_tenant_resources(tenant)
-
-        # Step 3: API key generated above
-
-        # Step 4: Store in RelationalCore if available
+        # Step 1: Write to PostgreSQL first (write-through) so the tenant
+        # survives restarts. If PG write fails, abort — don't create a
+        # tenant that only exists in memory.
         if "relational" in self.engines:
             try:
                 await self.engines["relational"].execute(
@@ -111,7 +161,17 @@ class TenantManager:
                     [tenant_id, name, plan.value, "onboarding", api_key_hash,
                      json_dumps(config or {})])
             except Exception as e:
-                logger.warning(f"Failed to persist tenant to DB: {e}")
+                logger.error(f"Failed to persist tenant to DB: {e}")
+                raise
+
+        # Step 2: Update in-memory cache
+        self._tenants[tenant_id] = tenant
+        self._api_key_index[api_key_hash] = tenant_id
+
+        # Step 3: Create tenant-specific resources
+        await self._create_tenant_resources(tenant)
+
+        # Step 4: API key generated above
 
         # Step 5: Activate
         await self.activate(tenant_id)
@@ -144,10 +204,23 @@ class TenantManager:
             except Exception as e:
                 logger.warning(f"ImmutableCore genesis for {tid}: {e}")
 
+    async def _update_tenant_status(self, tenant_id: str, status: str, extra_sql: str = ""):
+        """Write-through: update PG first, then in-memory cache."""
+        if "relational" in self.engines:
+            sql = f"UPDATE tenants SET status = $1{extra_sql} WHERE tenant_id = $2"
+            params = [status, tenant_id]
+            try:
+                await self.engines["relational"].execute(sql, params)
+            except Exception as e:
+                logger.error(f"Failed to update tenant {tenant_id} status in DB: {e}")
+                raise
+
     async def activate(self, tenant_id: str):
         tenant = self._tenants.get(tenant_id)
         if not tenant:
             raise ValueError(f"Tenant {tenant_id} not found")
+        await self._update_tenant_status(
+            tenant_id, "active", ", activated_at = NOW()")
         tenant.status = TenantStatus.ACTIVE
         tenant.activated_at = time.time()
 
@@ -155,6 +228,7 @@ class TenantManager:
         tenant = self._tenants.get(tenant_id)
         if not tenant:
             raise ValueError(f"Tenant {tenant_id} not found")
+        await self._update_tenant_status(tenant_id, "suspended")
         tenant.status = TenantStatus.SUSPENDED
         logger.warning(f"Tenant suspended: {tenant_id} reason={reason}")
 
@@ -162,6 +236,8 @@ class TenantManager:
         tenant = self._tenants.get(tenant_id)
         if not tenant:
             raise ValueError(f"Tenant {tenant_id} not found")
+        await self._update_tenant_status(
+            tenant_id, "offboarding", ", deactivated_at = NOW()")
         tenant.status = TenantStatus.OFFBOARDING
 
     async def export_data(self, tenant_id: str) -> Dict:
@@ -213,6 +289,8 @@ class TenantManager:
             except Exception:
                 pass
 
+        # Persist purge status to PG, then update in-memory cache
+        await self._update_tenant_status(tenant_id, "purged")
         tenant.status = TenantStatus.PURGED
         self._api_key_index.pop(tenant.api_key_hash, None)
         purged["status"] = "purged"

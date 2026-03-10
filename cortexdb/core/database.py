@@ -150,6 +150,10 @@ class ReadCascade:
         self._r1_hits = 0
         self._r2_hits = 0
         self._r3_hits = 0
+        # Request coalescing: prevents cache stampede when multiple concurrent
+        # requests for the same query all miss R0-R2 and hit R3 (PostgreSQL).
+        # Only one PG query is made; other callers await the same future.
+        self._pending_queries: Dict[str, asyncio.Future] = {}
 
     def _query_hash(self, query: str, params: Optional[Dict] = None,
                     tenant_id: Optional[str] = None) -> str:
@@ -206,13 +210,30 @@ class ReadCascade:
             except Exception as e:
                 logger.warning(f"R2 error: {e}")
 
-        # R3: Persistent Store
+        # R3: Persistent Store (with request coalescing to prevent cache stampede)
         if "relational" in self.engines:
             try:
-                # Set RLS context for tenant isolation
-                if tenant_id and self.tenant_isolation:
-                    await self.tenant_isolation.set_rls_context(tenant_id)
-                data = await self.engines["relational"].execute(query, params)
+                # Check if an identical query is already in-flight
+                if qhash in self._pending_queries:
+                    # Coalesce: await the existing future instead of hitting PG again
+                    data = await self._pending_queries[qhash]
+                else:
+                    # First request for this query — create a future and execute
+                    loop = asyncio.get_running_loop()
+                    future: asyncio.Future = loop.create_future()
+                    self._pending_queries[qhash] = future
+                    try:
+                        # Set RLS context for tenant isolation
+                        if tenant_id and self.tenant_isolation:
+                            await self.tenant_isolation.set_rls_context(tenant_id)
+                        data = await self.engines["relational"].execute(query, params)
+                        future.set_result(data)
+                    except Exception as exc:
+                        future.set_exception(exc)
+                        raise
+                    finally:
+                        self._pending_queries.pop(qhash, None)
+
                 if data is not None:
                     await self._promote_to_r1(f"{cache_prefix}cache:{qhash}", data, ttl=3600)
                     self._r0_set(r0_key, data)
@@ -456,6 +477,8 @@ class CortexDB:
         self.embedding = None
         self.precompute = None
         self.tenant_isolation = None
+        self.embedding_sync = None
+        self.agent_memory = None
         self._connected = False
         self._query_count = 0
         self._start_time = time.time()
@@ -470,7 +493,7 @@ class CortexDB:
             "stream": {"url": os.getenv("STREAM_CORE_URL", "redis://localhost:6380/0"),
                        "password": os.getenv("STREAM_CORE_PASSWORD", "cortex_stream_secret")},
             "temporal": {"url": os.getenv("TEMPORAL_CORE_URL", "postgresql://cortex:cortex_secret@localhost:5432/cortexdb")},
-            "immutable": {"path": os.getenv("IMMUTABLE_CORE_PATH", "./data/immutable")},
+            "immutable": {"url": os.getenv("RELATIONAL_CORE_URL", "postgresql://cortex:cortex_secret@localhost:5432/cortexdb")},
             "graph": {"url": os.getenv("GRAPH_CORE_URL", "postgresql://cortex:cortex_secret@localhost:5432/cortexdb")},
         }
 
@@ -497,6 +520,9 @@ class CortexDB:
 
         for name, (cls, cfg) in engine_classes.items():
             try:
+                # ImmutableCore shares the relational pool for PG-backed ledger
+                if name == "immutable" and "relational" in self.engines:
+                    cfg["relational_engine"] = self.engines["relational"]
                 engine = cls(cfg)
                 await engine.connect()
                 self.engines[name] = engine
@@ -529,6 +555,32 @@ class CortexDB:
             self.embedding = EmbeddingPipeline()
         except Exception:
             pass
+
+        # Start Embedding Sync Pipeline (auto-refresh vectors on PG changes)
+        if self.embedding and "relational" in self.engines and "vector" in self.engines:
+            try:
+                from cortexdb.core.embedding_sync import EmbeddingSyncPipeline
+                self.embedding_sync = EmbeddingSyncPipeline(
+                    engines=self.engines,
+                    embedding_pipeline=self.embedding,
+                )
+                await self.embedding_sync.install_triggers()
+                await self.embedding_sync.start()
+                logger.info("  + EMBEDDING SYNC pipeline started")
+            except Exception as e:
+                logger.warning(f"  x EMBEDDING SYNC unavailable: {e}")
+
+        # Initialize Agent Memory Protocol
+        if self.embedding:
+            try:
+                from cortexdb.core.agent_memory import AgentMemory
+                self.agent_memory = AgentMemory(
+                    engines=self.engines,
+                    embedding=self.embedding,
+                )
+                logger.info("  + AGENT MEMORY protocol initialized")
+            except Exception as e:
+                logger.warning(f"  x AGENT MEMORY unavailable: {e}")
 
         self._connected = True
         logger.info(f"CortexDB ready - {len(self.engines)}/{len(engine_classes)} engines online")
@@ -609,7 +661,9 @@ class CortexDB:
             "amygdala": self.amygdala.stats,
             "bridge": self.bridge.get_stats() if self.bridge else {},
             "embedding": self.embedding.get_info() if self.embedding else {"status": "not_loaded"},
+            "embedding_sync": self.embedding_sync.get_status() if self.embedding_sync else {"status": "not_loaded"},
             "sleep_cycle": self.sleep_cycle.get_status() if self.sleep_cycle else {},
+            "agent_memory": self.agent_memory.get_info() if self.agent_memory else {"status": "not_loaded"},
         }
         for name, engine in self.engines.items():
             try:
@@ -620,6 +674,13 @@ class CortexDB:
         return health
 
     async def close(self):
+        # Stop embedding sync pipeline first (it holds a PG connection)
+        if self.embedding_sync:
+            try:
+                await self.embedding_sync.stop()
+            except Exception as e:
+                logger.warning(f"Embedding sync stop error: {e}")
+
         for name, engine in self.engines.items():
             try:
                 await engine.close()

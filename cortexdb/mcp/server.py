@@ -5,14 +5,18 @@ AI agents (Claude, LangGraph, OpenAI Agents) discover and use CortexDB
 for cross-engine queries, semantic search, and agent-to-agent discovery.
 
 Tools:
-  cortexdb.query      - Execute CortexQL query (cross-engine)
-  cortexdb.write      - Write data with fan-out (multi-engine)
-  cortexdb.health     - Check system health
-  cortexdb.blocks     - List/search blocks
-  cortexdb.agents     - List/search agents
-  cortexdb.ledger     - Verify/read immutable ledger
-  cortexdb.cache      - Cache statistics
-  cortexdb.a2a        - Discover agents via A2A
+  cortexdb.query        - Execute CortexQL query (cross-engine)
+  cortexdb.write        - Write data with fan-out (multi-engine)
+  cortexdb.health       - Check system health
+  cortexdb.blocks       - List/search blocks
+  cortexdb.agents       - List/search agents
+  cortexdb.ledger       - Verify/read immutable ledger
+  cortexdb.cache        - Cache statistics
+  cortexdb.a2a          - Discover agents via A2A
+  cortexdb.memory.store - Store an agent memory
+  cortexdb.memory.recall - Recall relevant agent memories
+  cortexdb.memory.forget - GDPR-compliant memory deletion
+  cortexdb.memory.share  - Share a memory with other agents
 """
 
 import json
@@ -124,6 +128,70 @@ class CortexMCPServer:
                     },
                     "required": ["skill"],
                 }),
+            # ── Agent Memory Protocol tools ───────────────────────────
+            "cortexdb.memory.store": MCPToolDefinition(
+                name="cortexdb.memory.store",
+                description="Store a memory for an AI agent. Auto-embeds content for semantic recall, indexes across PostgreSQL and Qdrant, and caches working memory in Redis.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {"type": "string", "description": "The agent storing the memory"},
+                        "content": {"type": "string", "description": "Text content of the memory"},
+                        "memory_type": {"type": "string", "enum": ["episodic", "semantic", "working"], "default": "episodic",
+                                        "description": "Memory type: episodic (events, auto-decays), semantic (facts, stable), working (short-term, Redis-backed)"},
+                        "metadata": {"type": "object", "description": "Optional metadata (JSON object)"},
+                        "tenant_id": {"type": "string", "description": "Tenant ID for isolation"},
+                        "ttl_seconds": {"type": "integer", "description": "Time-to-live in seconds (auto-set for working memory)"},
+                        "importance": {"type": "number", "description": "Relevance weight 0.0-1.0 (default 0.5)"},
+                    },
+                    "required": ["agent_id", "content"],
+                }),
+            "cortexdb.memory.recall": MCPToolDefinition(
+                name="cortexdb.memory.recall",
+                description="Recall relevant memories for an AI agent via semantic search with time decay. Searches owned and shared memories across Qdrant and Redis.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {"type": "string", "description": "The agent recalling memories"},
+                        "query": {"type": "string", "description": "Natural-language query to match against memories"},
+                        "memory_type": {"type": "string", "enum": ["episodic", "semantic", "working"],
+                                        "description": "Filter by memory type (optional)"},
+                        "limit": {"type": "integer", "default": 10, "description": "Max memories to return (1-100)"},
+                        "time_decay": {"type": "boolean", "default": True, "description": "Apply time decay (newer memories score higher)"},
+                        "include_shared": {"type": "boolean", "default": True, "description": "Include memories shared with this agent"},
+                        "tenant_id": {"type": "string", "description": "Tenant ID for isolation"},
+                    },
+                    "required": ["agent_id", "query"],
+                }),
+            "cortexdb.memory.forget": MCPToolDefinition(
+                name="cortexdb.memory.forget",
+                description="GDPR-compliant memory deletion. Removes agent memories from PostgreSQL, Qdrant, and Redis. Specify at least one of memory_id, before, or memory_type.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {"type": "string", "description": "The agent whose memories to delete"},
+                        "memory_id": {"type": "string", "description": "Delete a specific memory by UUID"},
+                        "before": {"type": "number", "description": "Delete all memories created before this Unix timestamp"},
+                        "memory_type": {"type": "string", "enum": ["episodic", "semantic", "working"],
+                                        "description": "Delete all memories of this type"},
+                        "tenant_id": {"type": "string", "description": "Tenant ID for isolation"},
+                    },
+                    "required": ["agent_id"],
+                }),
+            "cortexdb.memory.share": MCPToolDefinition(
+                name="cortexdb.memory.share",
+                description="Share an agent memory with other agents. Only the owning agent can share. Updates ACL in PostgreSQL and Qdrant.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {"type": "string", "description": "The owning agent's ID"},
+                        "memory_id": {"type": "string", "description": "The memory UUID to share"},
+                        "target_agent_ids": {"type": "array", "items": {"type": "string"},
+                                             "description": "List of agent IDs to grant access"},
+                        "tenant_id": {"type": "string", "description": "Tenant ID for isolation"},
+                    },
+                    "required": ["agent_id", "memory_id", "target_agent_ids"],
+                }),
         }
 
     def list_tools(self) -> List[Dict]:
@@ -216,6 +284,62 @@ class CortexMCPServer:
                     "agents": [], "query": args.get("skill"),
                     "note": "A2A discovery requires VectorCore with agent embeddings"})
 
+            # ── Agent Memory Protocol handlers ────────────────────
+            elif tool_name == "cortexdb.memory.store":
+                if not self.db.agent_memory:
+                    return MCPToolResult(is_error=True,
+                                        error_message="Agent Memory not initialized")
+                result = await self.db.agent_memory.store(
+                    agent_id=args["agent_id"],
+                    content=args["content"],
+                    memory_type=args.get("memory_type", "episodic"),
+                    metadata=args.get("metadata"),
+                    tenant_id=args.get("tenant_id"),
+                    ttl_seconds=args.get("ttl_seconds"),
+                    importance=float(args.get("importance", 0.5)),
+                )
+                return MCPToolResult(content=result)
+
+            elif tool_name == "cortexdb.memory.recall":
+                if not self.db.agent_memory:
+                    return MCPToolResult(is_error=True,
+                                        error_message="Agent Memory not initialized")
+                result = await self.db.agent_memory.recall(
+                    agent_id=args["agent_id"],
+                    query=args["query"],
+                    memory_type=args.get("memory_type"),
+                    limit=int(args.get("limit", 10)),
+                    time_decay=args.get("time_decay", True),
+                    include_shared=args.get("include_shared", True),
+                    tenant_id=args.get("tenant_id"),
+                )
+                return MCPToolResult(content={"memories": result, "count": len(result)})
+
+            elif tool_name == "cortexdb.memory.forget":
+                if not self.db.agent_memory:
+                    return MCPToolResult(is_error=True,
+                                        error_message="Agent Memory not initialized")
+                result = await self.db.agent_memory.forget(
+                    agent_id=args["agent_id"],
+                    memory_id=args.get("memory_id"),
+                    before=args.get("before"),
+                    memory_type=args.get("memory_type"),
+                    tenant_id=args.get("tenant_id"),
+                )
+                return MCPToolResult(content=result)
+
+            elif tool_name == "cortexdb.memory.share":
+                if not self.db.agent_memory:
+                    return MCPToolResult(is_error=True,
+                                        error_message="Agent Memory not initialized")
+                result = await self.db.agent_memory.share(
+                    agent_id=args["agent_id"],
+                    memory_id=args["memory_id"],
+                    target_agent_ids=args["target_agent_ids"],
+                    tenant_id=args.get("tenant_id"),
+                )
+                return MCPToolResult(content=result)
+
         except Exception as e:
             logger.error(f"MCP tool error [{tool_name}]: {e}")
             return MCPToolResult(is_error=True, error_message=str(e))
@@ -272,5 +396,5 @@ class CortexMCPServer:
             "protocol": "MCP",
             "tools_count": len(self._tools),
             "capabilities": ["query", "write", "health", "blocks", "agents",
-                             "ledger", "cache", "a2a", "cortexgraph"],
+                             "ledger", "cache", "a2a", "cortexgraph", "memory"],
         }
