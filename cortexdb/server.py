@@ -1126,11 +1126,18 @@ async def run_stress_test(
 
 # ── RAG Pipeline Endpoints ─────────────────────────────────────────
 
+MAX_RAG_TEXT_SIZE = 10 * 1024 * 1024  # 10MB max ingest size
+
+
 @app.post("/v1/rag/ingest")
 async def rag_ingest(request: Request, body: dict):
     """Ingest a document for RAG."""
     if not db or not db.rag:
         raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
+    if "text" not in body or "doc_id" not in body:
+        raise HTTPException(status_code=422, detail="Required fields: text, doc_id")
+    if len(body["text"]) > MAX_RAG_TEXT_SIZE:
+        raise HTTPException(status_code=413, detail=f"Text exceeds {MAX_RAG_TEXT_SIZE // (1024*1024)}MB limit")
     tid = _tenant_id(request)
     result = await db.rag.ingest(
         text=body["text"], doc_id=body["doc_id"],
@@ -1144,6 +1151,8 @@ async def rag_retrieve(request: Request, body: dict):
     """Retrieve relevant chunks for a query (basic or smart mode)."""
     if not db or not db.rag:
         raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
+    if "query" not in body:
+        raise HTTPException(status_code=422, detail="Required field: query")
     tid = _tenant_id(request)
     result = await db.rag.retrieve_with_context(
         query=body["query"],
@@ -1157,13 +1166,11 @@ async def rag_retrieve(request: Request, body: dict):
 
 @app.post("/v1/rag/smart-retrieve")
 async def rag_smart_retrieve(request: Request, body: dict):
-    """Intelligent RAG retrieval with query understanding, feedback loop, and grounding.
-
-    Analyzes query intent, generates multi-query variants, scores confidence,
-    auto-reformulates on low confidence, and verifies answer grounding.
-    """
+    """Intelligent RAG retrieval with query understanding, feedback loop, and grounding."""
     if not db or not db.rag:
         raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
+    if "query" not in body:
+        raise HTTPException(status_code=422, detail="Required field: query")
     tid = _tenant_id(request)
     result = await db.rag.smart_retrieve(
         query=body["query"],
@@ -1180,6 +1187,10 @@ async def rag_ingest_hierarchical(request: Request, body: dict):
     """Ingest with parent-child chunking for precision + rich context."""
     if not db or not db.rag:
         raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
+    if "text" not in body or "doc_id" not in body:
+        raise HTTPException(status_code=422, detail="Required fields: text, doc_id")
+    if len(body["text"]) > MAX_RAG_TEXT_SIZE:
+        raise HTTPException(status_code=413, detail=f"Text exceeds {MAX_RAG_TEXT_SIZE // (1024*1024)}MB limit")
     tid = _tenant_id(request)
     result = await db.rag.ingest_hierarchical(
         text=body["text"], doc_id=body["doc_id"],

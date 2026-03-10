@@ -151,12 +151,20 @@ class RAGPipeline:
           2. Select retrieval strategy based on intent
           3. Reformulate into multiple query variants
           4. Search with each variant, merge results
-          5. Score confidence — re-search if low
-          6. Verify answer grounding, build citations
-          7. Return enriched results
+          5. Score confidence — re-search if low (always scored against ORIGINAL query)
+          6. Expand parent context for hierarchically-chunked docs
+          7. Verify answer grounding, build citations
+          8. Return enriched results
 
         Returns: {query, intent, strategy, results, confidence, citations, grounding, attempts}
         """
+        # Guard: need vector engine
+        if "vector" not in self.engines:
+            return {"query": query, "intent": {}, "strategy": {}, "results": [],
+                    "confidence": {"overall": 0, "verdict": "insufficient"},
+                    "citations": [], "grounding": {}, "attempts": 0,
+                    "reformulations_used": [], "query_variants": []}
+
         # 1. Understand the query
         intent = self.query_understanding.analyze(query)
         strategy = self.query_understanding.select_strategy(intent)
@@ -185,7 +193,6 @@ class RAGPipeline:
                     rid = r.get("id", "")
                     if rid not in seen_ids:
                         seen_ids.add(rid)
-                        # Normalize to flat dict for scoring
                         payload = r.get("payload", {})
                         all_results.append({
                             "id": rid,
@@ -194,6 +201,8 @@ class RAGPipeline:
                             "doc_id": payload.get("doc_id", ""),
                             "chunk_index": payload.get("chunk_index", 0),
                             "start_char": payload.get("start_char", 0),
+                            "parent_id": payload.get("parent_id"),
+                            "level": payload.get("level", "flat"),
                             "metadata": payload,
                         })
             except Exception as e:
@@ -203,6 +212,7 @@ class RAGPipeline:
         all_results.sort(key=lambda r: r["score"], reverse=True)
 
         # 4. Feedback loop: score confidence, reformulate if needed
+        #    IMPORTANT: Always score against the ORIGINAL query for fair comparison
         attempts = 1
         reformulations_used = []
         confidence = self.retrieval_feedback.score_results(query, all_results)
@@ -211,35 +221,67 @@ class RAGPipeline:
             logger.info("Low confidence (%.3f/%s), running feedback loop",
                          confidence.overall_score, confidence.verdict)
 
+            original_query = query  # capture for scoring consistency
+
             async def _search_fn(q, **kwargs):
                 t = kwargs.get("threshold", search_threshold)
-                l = kwargs.get("limit", search_limit)
+                lim = kwargs.get("limit", search_limit)
                 res = await self.engines["vector"].search_similar(
                     collection=target, query_text=q,
-                    threshold=t, limit=l, tenant_id=tenant_id)
+                    threshold=t, limit=lim, tenant_id=tenant_id)
                 return [{"id": r.get("id", ""), "content": r.get("payload", {}).get("content", ""),
                          "score": r.get("score", 0.0), "doc_id": r.get("payload", {}).get("doc_id", ""),
                          "chunk_index": r.get("payload", {}).get("chunk_index", 0),
                          "start_char": r.get("payload", {}).get("start_char", 0),
+                         "parent_id": r.get("payload", {}).get("parent_id"),
+                         "level": r.get("payload", {}).get("level", "flat"),
                          "metadata": r.get("payload", {})} for r in res]
 
             feedback_result = await self.retrieval_feedback.adaptive_search(
                 query, _search_fn, threshold=search_threshold, limit=search_limit)
 
-            if feedback_result["confidence"].overall_score > confidence.overall_score:
+            # Re-score feedback results against the ORIGINAL query for fair comparison
+            feedback_confidence = self.retrieval_feedback.score_results(
+                original_query, feedback_result["results"])
+            if feedback_confidence.overall_score > confidence.overall_score:
                 all_results = feedback_result["results"]
-                confidence = feedback_result["confidence"]
+                confidence = feedback_confidence
             attempts = feedback_result["attempts"]
             reformulations_used = feedback_result["reformulations_used"]
 
         # 5. Trim to requested limit
         final_results = all_results[:limit]
 
-        # 6. Grounding verification
+        # 6. Parent context expansion for hierarchically-chunked results
+        #    If child chunks have parent_ids, fetch parent content from PG for richer context
+        parent_expanded = False
+        if any(r.get("parent_id") for r in final_results) and "relational" in self.engines:
+            try:
+                parent_ids = list(set(r["parent_id"] for r in final_results if r.get("parent_id")))
+                pool = self.engines["relational"].pool
+                async with pool.acquire() as conn:
+                    rows = await conn.fetch(
+                        "SELECT chunk_id, content, metadata FROM rag_chunks WHERE chunk_id = ANY($1::text[])",
+                        parent_ids)
+                    parent_map = {row["chunk_id"]: {"content": row["content"],
+                                                     "metadata": json.loads(row["metadata"]) if row["metadata"] else {}}
+                                  for row in rows}
+
+                # Attach parent context to each result
+                for r in final_results:
+                    pid = r.get("parent_id")
+                    if pid and pid in parent_map:
+                        r["parent_content"] = parent_map[pid]["content"]
+                        r["parent_token_count"] = len(parent_map[pid]["content"]) // 4
+                        parent_expanded = True
+            except Exception as e:
+                logger.warning("Parent context expansion failed: %s", e)
+
+        # 7. Grounding verification
         chunks_text = [r["content"] for r in final_results]
         grounding = self.answer_grounding.verify_grounding(chunks_text, query)
 
-        # 7. Build citations
+        # 8. Build citations
         citations = self.answer_grounding.build_citations(final_results)
 
         return {
@@ -264,6 +306,7 @@ class RAGPipeline:
             "attempts": attempts,
             "reformulations_used": reformulations_used,
             "query_variants": query_variants,
+            "parent_expanded": parent_expanded,
         }
 
     async def retrieve_with_context(self, query: str, collection: str = "documents",

@@ -17,9 +17,31 @@ from typing import Any, Callable, Dict, List, Optional
 logger = logging.getLogger("cortexdb.core.retrieval_feedback")
 
 
+_STOP_WORDS = {
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "need", "to", "of", "in",
+    "for", "on", "with", "at", "by", "from", "as", "into", "through",
+    "during", "before", "after", "above", "below", "between", "out", "off",
+    "over", "under", "again", "then", "once", "here", "there", "when",
+    "where", "why", "how", "all", "both", "each", "few", "more", "most",
+    "other", "some", "such", "no", "nor", "not", "only", "own", "same",
+    "so", "than", "too", "very", "just", "about", "up", "and", "but",
+    "or", "if", "while", "because", "until", "that", "this", "these",
+    "those", "it", "its", "i", "me", "my", "we", "our", "you", "your",
+    "he", "him", "his", "she", "her", "they", "them", "their", "what",
+    "which", "who", "whom",
+}
+
+
 def _tokenize(text: str) -> List[str]:
     """Lowercase tokenization with basic punctuation removal."""
     return re.findall(r"[a-z0-9]+", text.lower())
+
+
+def _content_tokens(text: str) -> set:
+    """Extract content tokens (excluding stop words) for meaningful comparison."""
+    return {t for t in _tokenize(text) if t not in _STOP_WORDS and len(t) > 1}
 
 
 def _unique_tokens(text: str) -> set:
@@ -80,7 +102,7 @@ class RetrievalFeedback:
                 suggestions=["no results returned — broaden search or lower threshold"],
             )
 
-        query_terms = _unique_tokens(query)
+        query_terms = _content_tokens(query)
         scores = [r.get("score", 0.0) for r in results]
         contents = [r.get("content", "") for r in results]
 
@@ -119,27 +141,32 @@ class RetrievalFeedback:
 
     @staticmethod
     def _coverage(query_terms: set, contents: List[str]) -> float:
-        """Fraction of query terms that appear in at least one result."""
+        """Fraction of query content terms that appear in at least one result.
+        Uses content tokens (stop words excluded) for meaningful signal."""
         if not query_terms:
             return 1.0
         combined_tokens = set()
         for c in contents:
-            combined_tokens.update(_unique_tokens(c))
+            combined_tokens.update(_content_tokens(c))
         matched = query_terms & combined_tokens
         return len(matched) / len(query_terms)
 
     @staticmethod
     def _coherence(scores: List[float]) -> float:
-        """Score consistency — low variance among scores means a coherent cluster.
+        """Top-k quality — do the top results have strong absolute scores?
 
-        Returns 1.0 for perfectly consistent scores, approaches 0.0 for high variance.
+        Rewards result sets where the top results score highly.
+        A tight cluster of HIGH scores is good; a tight cluster of LOW scores is bad.
         """
-        if len(scores) < 2:
-            return 1.0
-        mean = sum(scores) / len(scores)
-        variance = sum((s - mean) ** 2 for s in scores) / len(scores)
-        # Normalise: variance of 0 -> 1.0, variance of 0.25 -> ~0.0
-        return max(0.0, 1.0 - 4.0 * variance)
+        if not scores:
+            return 0.0
+        if len(scores) == 1:
+            return min(1.0, scores[0])
+        # Use the mean of the top-3 scores (or fewer if less available)
+        sorted_desc = sorted(scores, reverse=True)
+        top_k = sorted_desc[:min(3, len(sorted_desc))]
+        top_mean = sum(top_k) / len(top_k)
+        return max(0.0, min(1.0, top_mean))
 
     @staticmethod
     def _relevance_curve_penalty(scores: List[float]) -> float:
@@ -343,7 +370,7 @@ class RetrievalFeedback:
                 current_kwargs["score_threshold"] = params["score_threshold"]
             elif "score_threshold_increase" in params:
                 current_threshold = current_kwargs.get("score_threshold", 0.5)
-                current_kwargs["score_threshold"] = current_threshold + params["score_threshold_increase"]
+                current_kwargs["score_threshold"] = min(0.95, current_threshold + params["score_threshold_increase"])
 
             if "top_k_multiplier" in params:
                 current_top_k = current_kwargs.get("top_k", 10)
@@ -384,7 +411,7 @@ class AnswerGrounding:
                 "warnings": List[str],
             }
         """
-        query_terms = _unique_tokens(query)
+        query_terms = _content_tokens(query)
         if not query_terms:
             return {
                 "grounded_chunks": list(range(len(answer_chunks))),
@@ -393,13 +420,16 @@ class AnswerGrounding:
                 "warnings": ["empty query — all chunks treated as grounded"],
             }
 
+        # Require at least 2 content-word overlaps (or 1 if query has <=2 terms)
+        min_overlap = min(2, len(query_terms))
+
         grounded: List[int] = []
         ungrounded: List[int] = []
 
         for idx, chunk in enumerate(answer_chunks):
-            chunk_tokens = _unique_tokens(chunk)
+            chunk_tokens = _content_tokens(chunk)
             overlap = query_terms & chunk_tokens
-            if overlap:
+            if len(overlap) >= min_overlap:
                 grounded.append(idx)
             else:
                 ungrounded.append(idx)

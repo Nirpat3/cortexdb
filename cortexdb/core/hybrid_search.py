@@ -157,7 +157,10 @@ class HybridSearch:
                 sql += " AND tenant_id = $2"
                 params.append(tenant_id)
 
-            sql += f" ORDER BY rank DESC LIMIT {min(limit, 100)}"
+            # Parameterized LIMIT to avoid SQL injection patterns
+            param_idx = len(params) + 1
+            sql += f" ORDER BY rank DESC LIMIT ${param_idx}"
+            params.append(int(min(limit, 100)))
 
             async with pool.acquire() as conn:
                 rows = await conn.fetch(sql, *params)
