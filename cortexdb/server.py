@@ -1029,6 +1029,31 @@ async def audit_log_stats():
     return compliance_audit.get_stats() if compliance_audit else {}
 
 
+# ── RAG: Hybrid Search Endpoint ──
+
+@app.post("/v1/rag/search")
+async def rag_hybrid_search(request: Request, body: dict):
+    """Hybrid search: dense vectors + BM25 sparse + optional re-ranking."""
+    from fastapi.responses import JSONResponse
+    tid = _tenant_id(request)
+    if not db.hybrid_search:
+        return JSONResponse(status_code=503, content={"error": "Hybrid search not available"})
+    results = await db.hybrid_search.search(
+        query=body["query"],
+        collection=body.get("collection", "documents"),
+        limit=body.get("limit", 10),
+        tenant_id=tid,
+        rerank=body.get("rerank", True),
+    )
+    return {"results": [{"chunk_id": r.chunk_id, "content": r.content,
+                         "score": round(r.score, 4),
+                         "dense_score": round(r.dense_score, 4),
+                         "sparse_score": round(r.sparse_score, 4),
+                         "rerank_score": round(r.rerank_score, 4) if r.rerank_score else None,
+                         "metadata": r.metadata}
+                        for r in results]}
+
+
 # ── Benchmark Endpoints ──
 
 from cortexdb.benchmark.runner import BenchmarkRunner
@@ -1097,6 +1122,46 @@ async def run_stress_test(
 
     result = await _stress_engine.run(config, _read, _write)
     return result.to_dict()
+
+
+# ── RAG Pipeline Endpoints ─────────────────────────────────────────
+
+@app.post("/v1/rag/ingest")
+async def rag_ingest(request: Request, body: dict):
+    """Ingest a document for RAG."""
+    if not db or not db.rag:
+        raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
+    tid = _tenant_id(request)
+    result = await db.rag.ingest(
+        text=body["text"], doc_id=body["doc_id"],
+        collection=body.get("collection", "documents"),
+        metadata=body.get("metadata"), tenant_id=tid)
+    return result
+
+
+@app.post("/v1/rag/retrieve")
+async def rag_retrieve(request: Request, body: dict):
+    """Retrieve relevant chunks for a query."""
+    if not db or not db.rag:
+        raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
+    tid = _tenant_id(request)
+    result = await db.rag.retrieve_with_context(
+        query=body["query"],
+        collection=body.get("collection", "documents"),
+        limit=body.get("limit", 5),
+        max_tokens=body.get("max_tokens", 4000),
+        tenant_id=tid)
+    return result
+
+
+@app.delete("/v1/rag/documents/{doc_id}")
+async def rag_delete(doc_id: str, request: Request):
+    """Delete a document and all its chunks."""
+    if not db or not db.rag:
+        raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
+    tid = _tenant_id(request)
+    result = await db.rag.delete_document(doc_id, tenant_id=tid)
+    return result
 
 
 @app.post("/v1/admin/benchmark/stop")

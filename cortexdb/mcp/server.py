@@ -17,6 +17,8 @@ Tools:
   cortexdb.memory.recall - Recall relevant agent memories
   cortexdb.memory.forget - GDPR-compliant memory deletion
   cortexdb.memory.share  - Share a memory with other agents
+  cortexdb.rag.ingest    - Ingest a document for RAG
+  cortexdb.rag.retrieve  - Retrieve relevant context for a query
 """
 
 import json
@@ -192,6 +194,39 @@ class CortexMCPServer:
                     },
                     "required": ["agent_id", "memory_id", "target_agent_ids"],
                 }),
+            # ── RAG Pipeline tools ────────────────────────────────────
+            "cortexdb.rag.ingest": MCPToolDefinition(
+                name="cortexdb.rag.ingest",
+                description="Ingest a document for RAG. Chunks the text, embeds each chunk, and stores in PostgreSQL + Qdrant for semantic retrieval.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string", "description": "The document text to ingest"},
+                        "doc_id": {"type": "string", "description": "Unique document identifier"},
+                        "collection": {"type": "string", "default": "documents",
+                                       "description": "Collection name for organizing documents"},
+                        "metadata": {"type": "object", "description": "Optional metadata (JSON object)"},
+                        "tenant_id": {"type": "string", "description": "Tenant ID for isolation"},
+                    },
+                    "required": ["text", "doc_id"],
+                }),
+            "cortexdb.rag.retrieve": MCPToolDefinition(
+                name="cortexdb.rag.retrieve",
+                description="Retrieve relevant document chunks for a query via semantic search. Returns ranked context formatted for LLM consumption with token budget control.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Natural-language query to match against document chunks"},
+                        "collection": {"type": "string", "default": "documents",
+                                       "description": "Collection to search in"},
+                        "limit": {"type": "integer", "default": 5,
+                                  "description": "Max chunks to return (1-50)"},
+                        "max_tokens": {"type": "integer", "default": 4000,
+                                       "description": "Maximum tokens in the context window"},
+                        "tenant_id": {"type": "string", "description": "Tenant ID for isolation"},
+                    },
+                    "required": ["query"],
+                }),
         }
 
     def list_tools(self) -> List[Dict]:
@@ -340,6 +375,33 @@ class CortexMCPServer:
                 )
                 return MCPToolResult(content=result)
 
+            # ── RAG Pipeline handlers ─────────────────────────────
+            elif tool_name == "cortexdb.rag.ingest":
+                if not self.db.rag:
+                    return MCPToolResult(is_error=True,
+                                        error_message="RAG pipeline not initialized")
+                result = await self.db.rag.ingest(
+                    text=args["text"],
+                    doc_id=args["doc_id"],
+                    collection=args.get("collection", "documents"),
+                    metadata=args.get("metadata"),
+                    tenant_id=args.get("tenant_id"),
+                )
+                return MCPToolResult(content=result)
+
+            elif tool_name == "cortexdb.rag.retrieve":
+                if not self.db.rag:
+                    return MCPToolResult(is_error=True,
+                                        error_message="RAG pipeline not initialized")
+                result = await self.db.rag.retrieve_with_context(
+                    query=args["query"],
+                    collection=args.get("collection", "documents"),
+                    limit=int(args.get("limit", 5)),
+                    max_tokens=int(args.get("max_tokens", 4000)),
+                    tenant_id=args.get("tenant_id"),
+                )
+                return MCPToolResult(content=result)
+
         except Exception as e:
             logger.error(f"MCP tool error [{tool_name}]: {e}")
             return MCPToolResult(is_error=True, error_message=str(e))
@@ -396,5 +458,5 @@ class CortexMCPServer:
             "protocol": "MCP",
             "tools_count": len(self._tools),
             "capabilities": ["query", "write", "health", "blocks", "agents",
-                             "ledger", "cache", "a2a", "cortexgraph", "memory"],
+                             "ledger", "cache", "a2a", "cortexgraph", "memory", "rag"],
         }

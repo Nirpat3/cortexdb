@@ -639,6 +639,8 @@ class CortexDB:
         self.tenant_isolation = None
         self.embedding_sync = None
         self.agent_memory = None
+        self.rag = None
+        self.hybrid_search = None
         self.outbox_worker = None
         self.field_encryption = None
         self.compliance_audit = None
@@ -749,6 +751,15 @@ class CortexDB:
         except Exception:
             pass
 
+        # Initialize Hybrid Search
+        if self.embedding:
+            try:
+                from cortexdb.core.hybrid_search import HybridSearch
+                self.hybrid_search = HybridSearch(self.engines, self.embedding)
+                logger.info("  + HYBRID SEARCH initialized (dense + sparse + re-ranking)")
+            except Exception as e:
+                logger.warning(f"  x HYBRID SEARCH unavailable: {e}")
+
         # Start Embedding Sync Pipeline (auto-refresh vectors on PG changes)
         if self.embedding and "relational" in self.engines and "vector" in self.engines:
             try:
@@ -791,6 +802,22 @@ class CortexDB:
                 logger.info("  + AGENT MEMORY protocol initialized")
             except Exception as e:
                 logger.warning(f"  x AGENT MEMORY unavailable: {e}")
+
+        # Initialize RAG pipeline
+        if self.embedding:
+            try:
+                import pathlib
+                from cortexdb.core.chunking import ChunkingPipeline
+                from cortexdb.core.rag import RAGPipeline
+                self.rag = RAGPipeline(self.engines, self.embedding)
+                # Install RAG schema
+                schema_path = pathlib.Path(__file__).parent / "rag_schema.sql"
+                if schema_path.exists() and pg_pool:
+                    async with pg_pool.acquire() as conn:
+                        await conn.execute(schema_path.read_text())
+                logger.info("  + RAG PIPELINE initialized")
+            except Exception as e:
+                logger.warning(f"  x RAG PIPELINE unavailable: {e}")
 
         self._connected = True
         logger.info(f"CortexDB ready - {len(self.engines)}/{len(engine_classes)} engines online")
@@ -874,6 +901,8 @@ class CortexDB:
             "embedding_sync": self.embedding_sync.get_status() if self.embedding_sync else {"status": "not_loaded"},
             "sleep_cycle": self.sleep_cycle.get_status() if self.sleep_cycle else {},
             "agent_memory": self.agent_memory.get_info() if self.agent_memory else {"status": "not_loaded"},
+            "rag_pipeline": self.rag.get_stats() if self.rag else {"status": "not_loaded"},
+            "hybrid_search": self.hybrid_search.get_stats() if self.hybrid_search else {"status": "not_loaded"},
             "outbox_worker": (await self.outbox_worker.get_metrics()) if self.outbox_worker else {"status": "not_loaded"},
             "encryption": self.field_encryption.get_stats() if self.field_encryption else {"status": "disabled"},
             "compliance_audit": self.compliance_audit.get_stats() if self.compliance_audit else {"status": "not_loaded"},
