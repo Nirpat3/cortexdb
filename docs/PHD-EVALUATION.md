@@ -334,19 +334,19 @@ The compliance `_check_evidence()` returns `True` as default for unknown evidenc
 
 ### Short-Term (P1) — First Production Release
 
-| # | Enhancement | Expert Source |
-|---|-------------|--------------|
-| 7 | Embedding sync pipeline (PG NOTIFY → re-embed → Qdrant) | AI/ML |
-| 8 | Transactional outbox pattern (replace in-memory DLQ) | Distributed |
-| 9 | Externalize A2A tasks + read-your-writes to Redis/PG | Distributed |
-| 10 | Adaptive semantic cache thresholds (per-collection) | AI/ML |
-| 11 | Wire field encryption + audit logging in data paths | Security |
+| # | Enhancement | Expert Source | Status |
+|---|-------------|--------------|--------|
+| 7 | Embedding sync pipeline (PG NOTIFY → re-embed → Qdrant) | AI/ML | Implemented |
+| 8 | Transactional outbox pattern (replace in-memory DLQ) | Distributed | Implemented |
+| 9 | Externalize A2A tasks + read-your-writes to Redis/PG | Distributed | Implemented |
+| 10 | Adaptive semantic cache thresholds (per-collection) | AI/ML | Implemented |
+| 11 | Wire field encryption + audit logging in data paths | Security | Implemented |
 
 ### Medium-Term (P2) — Enterprise Features
 
-| # | Enhancement | Expert Source |
-|---|-------------|--------------|
-| 12 | Agent memory protocol (remember/recall/forget/share) | AI/ML |
+| # | Enhancement | Expert Source | Status |
+|---|-------------|--------------|--------|
+| 12 | Agent memory protocol (remember/recall/forget/share) | AI/ML | Implemented |
 | 13 | Consistency levels on reads (eventual/session/strong) | Distributed |
 | 14 | Distributed saga for multi-engine sync writes | Distributed |
 | 15 | Hybrid search (BM25 sparse + dense + re-ranking) | AI/ML |
