@@ -180,9 +180,10 @@ class ReadCascade:
             # Move to end (most recently used) for LRU
             self._r0_cache.move_to_end(r0_key)
             self._r0_hits += 1
-            return QueryResult(data=self._r0_cache[r0_key], tier_served=CacheTier.R0_PROCESS,
-                               engines_hit=["r0_cache"],
-                               latency_ms=(time.perf_counter() - start) * 1000, cache_hit=True)
+            result = QueryResult(data=self._r0_cache[r0_key], tier_served=CacheTier.R0_PROCESS,
+                                 engines_hit=["r0_cache"],
+                                 latency_ms=(time.perf_counter() - start) * 1000, cache_hit=True)
+            return self._post_read(result, query, tenant_id)
         self._r0_misses += 1
 
         # R1: MemoryCore / Redis
@@ -194,9 +195,10 @@ class ReadCascade:
                     data = json.loads(cached)
                     self._r0_set(r0_key, data)
                     self._r1_hits += 1
-                    return QueryResult(data=data, tier_served=CacheTier.R1_MEMORY,
-                                       engines_hit=["memory_core"],
-                                       latency_ms=(time.perf_counter() - start) * 1000, cache_hit=True)
+                    result = QueryResult(data=data, tier_served=CacheTier.R1_MEMORY,
+                                         engines_hit=["memory_core"],
+                                         latency_ms=(time.perf_counter() - start) * 1000, cache_hit=True)
+                    return self._post_read(result, query, tenant_id)
             except Exception as e:
                 logger.warning(f"R1 error: {e}")
 
@@ -217,9 +219,10 @@ class ReadCascade:
                         await self._promote_to_r1(f"{cache_prefix}cache:{qhash}", data)
                         self._r0_set(r0_key, data)
                         self._r2_hits += 1
-                        return QueryResult(data=data, tier_served=CacheTier.R2_SEMANTIC,
-                                           engines_hit=["vector_core"],
-                                           latency_ms=(time.perf_counter() - start) * 1000, cache_hit=True)
+                        result = QueryResult(data=data, tier_served=CacheTier.R2_SEMANTIC,
+                                             engines_hit=["vector_core"],
+                                             latency_ms=(time.perf_counter() - start) * 1000, cache_hit=True)
+                        return self._post_read(result, query, tenant_id)
             except Exception as e:
                 logger.warning(f"R2 error: {e}")
 
@@ -251,9 +254,10 @@ class ReadCascade:
                     await self._promote_to_r1(f"{cache_prefix}cache:{qhash}", data, ttl=3600)
                     self._r0_set(r0_key, data)
                     self._r3_hits += 1
-                    return QueryResult(data=data, tier_served=CacheTier.R3_PERSISTENT,
-                                       engines_hit=["relational_core"],
-                                       latency_ms=(time.perf_counter() - start) * 1000, cache_hit=False)
+                    result = QueryResult(data=data, tier_served=CacheTier.R3_PERSISTENT,
+                                         engines_hit=["relational_core"],
+                                         latency_ms=(time.perf_counter() - start) * 1000, cache_hit=False)
+                    return self._post_read(result, query, tenant_id)
             except Exception as e:
                 logger.error(f"R3 error: {e}")
 
@@ -262,6 +266,64 @@ class ReadCascade:
                            engines_hit=["deep_retrieval"],
                            latency_ms=(time.perf_counter() - start) * 1000, cache_hit=False,
                            metadata={"note": "R4 deep retrieval"})
+
+    def _post_read(self, result, query, tenant_id=None):
+        """Post-read processing: decrypt encrypted fields and schedule audit logging.
+        Caches store the ENCRYPTED form; decryption happens only at read time."""
+        # Decrypt encrypted fields if present
+        if self.field_encryption and result.data is not None:
+            try:
+                result.data = self._decrypt_result(result.data)
+            except Exception as e:
+                logger.warning(f"Decryption error on read result: {e}")
+
+        # Audit logging (fire-and-forget via background task)
+        if self.audit and result.data is not None:
+            try:
+                from cortexdb.compliance.audit import AuditEventType
+                asyncio.ensure_future(self.audit.log(
+                    event_type=AuditEventType.DATA_READ,
+                    actor=tenant_id or "anonymous",
+                    resource=query[:200],
+                    action="read",
+                    outcome="success",
+                    tenant_id=tenant_id,
+                    details={
+                        "tier_served": result.tier_served.value,
+                        "cache_hit": result.cache_hit,
+                        "engines_hit": result.engines_hit,
+                    },
+                ))
+            except Exception as e:
+                logger.warning(f"Audit logging error on read: {e}")
+
+        return result
+
+    def _decrypt_result(self, data):
+        """Decrypt encrypted fields in read results. Handles single dicts and lists of dicts."""
+        if isinstance(data, dict):
+            has_encrypted = any(
+                isinstance(v, dict) and v.get("_encrypted")
+                for v in data.values()
+            )
+            if has_encrypted:
+                return self.field_encryption.decrypt_payload(data)
+        elif isinstance(data, list):
+            decrypted = []
+            for item in data:
+                if isinstance(item, dict):
+                    has_encrypted = any(
+                        isinstance(v, dict) and v.get("_encrypted")
+                        for v in item.values()
+                    )
+                    if has_encrypted:
+                        decrypted.append(self.field_encryption.decrypt_payload(item))
+                    else:
+                        decrypted.append(item)
+                else:
+                    decrypted.append(item)
+            return decrypted
+        return data
 
     def _r0_set(self, key: str, value: Any):
         # Size guard: skip caching entries larger than 1MB
@@ -365,9 +427,16 @@ class WriteFanOut:
 
         # Encrypt sensitive fields before writing (if enabled)
         write_payload = payload
+        encrypted_fields = []
         if self.field_encryption:
             try:
-                write_payload = self.field_encryption.encrypt_payload(dict(payload))
+                write_payload = self.field_encryption.encrypt_payload(
+                    dict(payload), table=data_type,
+                    tenant_id=payload.get("tenant_id"))
+                encrypted_fields = [
+                    k for k, v in write_payload.items()
+                    if isinstance(v, dict) and v.get("_encrypted")
+                ]
             except Exception as e:
                 logger.warning(f"Field encryption failed, writing plaintext: {e}")
 
@@ -420,13 +489,34 @@ class WriteFanOut:
 
         results["latency_ms"] = (time.perf_counter() - start) * 1000
 
+        # Report which fields were encrypted in the result
+        if encrypted_fields:
+            results["encryption"] = {
+                "encrypted_fields": encrypted_fields,
+            }
+
         # Audit log the write
         if self.audit:
             try:
-                await self.audit.log_write(data_type, actor, tenant_id,
-                                           list(results["sync"].keys()))
-            except Exception:
-                pass
+                from cortexdb.compliance.audit import AuditEventType
+                sync_engines = list(results.get("sync", {}).keys())
+                async_engines = list(results.get("async", {}).keys())
+                await self.audit.log(
+                    event_type=AuditEventType.DATA_WRITE,
+                    actor=actor,
+                    resource=data_type,
+                    action="write",
+                    outcome="success",
+                    tenant_id=payload.get("tenant_id"),
+                    details={
+                        "data_type": data_type,
+                        "sync_engines": sync_engines,
+                        "async_engines": async_engines,
+                        "encrypted_fields": encrypted_fields,
+                    },
+                )
+            except Exception as e:
+                logger.warning(f"Audit logging error on write: {e}")
 
         # Invalidate caches after write
         if self.cache_invalidation:
@@ -541,6 +631,7 @@ class CortexDB:
         self.agent_memory = None
         self.outbox_worker = None
         self.field_encryption = None
+        self.compliance_audit = None
         self._connected = False
         self._query_count = 0
         self._start_time = time.time()
@@ -607,22 +698,33 @@ class CortexDB:
         try:
             encryption_key = os.getenv("CORTEX_ENCRYPTION_KEY", "")
             if encryption_key:
-                from cortexdb.compliance.encryption import FieldEncryption
-                self.field_encryption = FieldEncryption({"master_key": encryption_key})
+                from cortexdb.compliance.encryption import FieldEncryption, KeyManager
+                key_manager = KeyManager(master_key=encryption_key)
+                self.field_encryption = FieldEncryption(key_manager)
                 logger.info("  + FIELD ENCRYPTION enabled")
             else:
                 logger.info("  - Field encryption disabled (set CORTEX_ENCRYPTION_KEY to enable)")
         except Exception as e:
             logger.warning(f"  x FIELD ENCRYPTION unavailable: {e}")
 
+        # Initialize compliance audit trail
+        try:
+            from cortexdb.compliance.audit import ComplianceAudit
+            self.compliance_audit = ComplianceAudit(engines=self.engines)
+            logger.info("  + COMPLIANCE AUDIT trail initialized")
+        except Exception as e:
+            logger.warning(f"  x COMPLIANCE AUDIT unavailable: {e}")
+
         # Get PG pool for outbox pattern
         pg_pool = getattr(self.engines.get("relational"), "pool", None)
 
         self.read_cascade = ReadCascade(self.engines, self.tenant_isolation,
-                                        field_encryption=self.field_encryption)
+                                        field_encryption=self.field_encryption,
+                                        audit=self.compliance_audit)
         self.write_fanout = WriteFanOut(self.engines, self.cache_invalidation,
                                         pool=pg_pool,
-                                        field_encryption=self.field_encryption)
+                                        field_encryption=self.field_encryption,
+                                        audit=self.compliance_audit)
         self.bridge = BridgeEngine(self.engines)
         self.parser = CortexQLParser()
         self.precompute = PreComputeEngine(self.plasticity, self.read_cascade, self.engines)
@@ -763,6 +865,8 @@ class CortexDB:
             "sleep_cycle": self.sleep_cycle.get_status() if self.sleep_cycle else {},
             "agent_memory": self.agent_memory.get_info() if self.agent_memory else {"status": "not_loaded"},
             "outbox_worker": (await self.outbox_worker.get_metrics()) if self.outbox_worker else {"status": "not_loaded"},
+            "encryption": self.field_encryption.get_stats() if self.field_encryption else {"status": "disabled"},
+            "compliance_audit": self.compliance_audit.get_stats() if self.compliance_audit else {"status": "not_loaded"},
         }
         for name, engine in self.engines.items():
             try:
