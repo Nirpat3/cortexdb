@@ -334,6 +334,7 @@ class RetrievalFeedback:
         reformulations_used: List[str] = []
         current_query = query
         current_kwargs = dict(search_kwargs)
+        original_top_k = current_kwargs.get("top_k", current_kwargs.get("limit", 10))
 
         for attempt in range(1 + self.max_reformulations):
             results = await search_fn(current_query, **current_kwargs)
@@ -373,8 +374,8 @@ class RetrievalFeedback:
                 current_kwargs["score_threshold"] = min(0.95, current_threshold + params["score_threshold_increase"])
 
             if "top_k_multiplier" in params:
-                current_top_k = current_kwargs.get("top_k", 10)
-                current_kwargs["top_k"] = int(current_top_k * params["top_k_multiplier"])
+                # Multiply against the ORIGINAL top_k, not the already-multiplied value
+                current_kwargs["top_k"] = int(original_top_k * params["top_k_multiplier"])
 
             if params.get("filter_low_scores"):
                 current_kwargs["filter_low_scores"] = True

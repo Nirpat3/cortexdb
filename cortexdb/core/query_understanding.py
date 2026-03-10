@@ -210,7 +210,12 @@ class QueryUnderstanding:
         """Generate multiple reformulated queries for better recall.
 
         Always returns the original query first, followed by keyword-focused,
-        synonym-expanded, and (for complex queries) decomposed sub-queries.
+        and (for complex queries) decomposed sub-queries.
+
+        Note: Synonym expansion is generated as a separate clean query per synonym
+        (e.g. "scale database" -> "scaling database", "scalability database") rather
+        than concatenating all synonyms into one mega-query, which would harm dense
+        vector search by diluting the embedding.
         """
         query_clean = query.strip()
         variants: List[str] = [query_clean]
@@ -220,10 +225,12 @@ class QueryUnderstanding:
         if keyword_version and keyword_version != query_clean.lower():
             variants.append(keyword_version)
 
-        # Synonym-expanded
-        expanded = self._expand_synonyms(query_clean)
-        if expanded and expanded != query_clean.lower():
-            variants.append(expanded)
+        # Synonym substitution: generate clean per-synonym queries instead of
+        # concatenating all synonyms into one bloated string (#12 fix).
+        synonym_variants = self._synonym_substitution(query_clean)
+        for sv in synonym_variants:
+            if sv and sv.lower() != query_clean.lower():
+                variants.append(sv)
 
         # Decomposed sub-queries for complex / compound questions
         sub_queries = self._decompose(query_clean)
@@ -232,10 +239,13 @@ class QueryUnderstanding:
             if sq_stripped and sq_stripped.lower() != query_clean.lower():
                 variants.append(sq_stripped)
 
-        # For comparative intents, generate per-entity queries
+        # For comparative intents, generate per-entity queries WITH topic context (#13 fix)
         if intent.intent_type == "comparative" and len(intent.entities) >= 2:
+            # Extract the topic by removing entity names and comparison words
+            topic_words = self._keyword_reformulation(query_clean)
             for entity in intent.entities:
-                per_entity = entity.strip()
+                # Include topic context: "Redis for caching" not just "Redis"
+                per_entity = f"{entity.strip()} {topic_words}".strip()
                 if per_entity and per_entity.lower() != query_clean.lower():
                     variants.append(per_entity)
 
@@ -428,6 +438,31 @@ class QueryUnderstanding:
                 i += 1
 
         return " ".join(expanded_parts)
+
+    def _synonym_substitution(self, query: str) -> List[str]:
+        """Generate clean per-synonym variant queries by substituting one term at a time.
+
+        Instead of concatenating all synonyms into one bloated query (which harms
+        dense vector embeddings), this generates separate queries like:
+          "scale database" -> ["scaling database", "scalability database"]
+        Each variant replaces exactly one term with one synonym.
+        """
+        words = query.lower().split()
+        variants: List[str] = []
+
+        for i, word in enumerate(words):
+            synonyms = []
+            if word in self._synonyms:
+                synonyms = self._synonyms[word][:2]  # cap at 2 synonyms per word
+            elif word in self._reverse_synonyms:
+                synonyms = [self._reverse_synonyms[word]]
+
+            for syn in synonyms:
+                new_words = list(words)
+                new_words[i] = syn
+                variants.append(" ".join(new_words))
+
+        return variants[:3]  # cap total synonym variants at 3
 
     def _decompose(self, query: str) -> List[str]:
         """Split compound questions into independent sub-queries."""

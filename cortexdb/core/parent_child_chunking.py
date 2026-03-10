@@ -333,6 +333,12 @@ class HierarchicalChunker:
         the *max_tokens* budget.  Returns parent-level dicts ordered by the
         best child score within each parent.
         """
+        # Build child_id -> parent index (O(P+C) instead of O(P*C) per lookup)
+        child_to_parent: Dict[str, ParentChunk] = {}
+        for parent in parents:
+            for cid in parent.children:
+                child_to_parent[cid] = parent
+
         # Map parent_id -> (parent, best_score, matching child ids).
         parent_map: Dict[str, dict] = {}
 
@@ -342,7 +348,7 @@ class HierarchicalChunker:
                 continue
             score = result.get("score", 0.0)
 
-            parent = self.get_parent_for_child(child_id, parents)
+            parent = child_to_parent.get(child_id)
             if parent is None:
                 logger.warning("No parent found for child_id=%s", child_id)
                 continue

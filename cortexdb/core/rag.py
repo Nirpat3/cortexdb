@@ -18,6 +18,7 @@ Integrates with:
   - RelationalEngine for metadata and chunk storage
 """
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -77,9 +78,9 @@ class RAGPipeline:
                     json.dumps(metadata or {}), tenant_id,
                     hashlib.sha256(text.encode()).hexdigest())
 
-        # 3. Embed all chunks in batch
+        # 3. Embed all chunks in batch (run in thread to avoid blocking event loop)
         texts = [c.content for c in chunks]
-        vectors = self.embedding.embed_batch(texts)
+        vectors = await asyncio.to_thread(self.embedding.embed_batch, texts)
 
         # 4. Upsert to Qdrant
         target_collection = f"tenant_{tenant_id}_{collection}" if tenant_id else collection
@@ -102,22 +103,21 @@ class RAGPipeline:
                 })
             await self.engines["vector"].upsert_vectors(target_collection, points)
 
-        # 5. Store chunks in PG for retrieval by ID
+        # 5. Store chunks in PG (batch insert to avoid N+1 round-trips)
         if "relational" in self.engines:
             pool = self.engines["relational"].pool
             async with pool.acquire() as conn:
-                for chunk in chunks:
-                    await conn.execute("""
-                        INSERT INTO rag_chunks (chunk_id, doc_id, content,
-                            chunk_index, start_char, end_char, token_count,
-                            metadata, tenant_id)
-                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9)
-                        ON CONFLICT (chunk_id) DO UPDATE SET
-                            content=$3, token_count=$7, metadata=$8::jsonb
-                    """, chunk.chunk_id, doc_id, chunk.content,
-                        chunk.chunk_index, chunk.start_char, chunk.end_char,
-                        chunk.token_count, json.dumps(chunk.metadata or {}),
-                        tenant_id)
+                await conn.executemany("""
+                    INSERT INTO rag_chunks (chunk_id, doc_id, content,
+                        chunk_index, start_char, end_char, token_count,
+                        metadata, tenant_id)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9)
+                    ON CONFLICT (chunk_id) DO UPDATE SET
+                        content=$3, token_count=$7, metadata=$8::jsonb
+                """, [(chunk.chunk_id, doc_id, chunk.content,
+                       chunk.chunk_index, chunk.start_char, chunk.end_char,
+                       chunk.token_count, json.dumps(chunk.metadata or {}),
+                       tenant_id) for chunk in chunks])
 
         self._ingest_count += 1
         return {"doc_id": doc_id, "chunks_created": len(chunks),
@@ -226,16 +226,22 @@ class RAGPipeline:
             async def _search_fn(q, **kwargs):
                 t = kwargs.get("threshold", search_threshold)
                 lim = kwargs.get("limit", search_limit)
+                do_filter = kwargs.get("filter_low_scores", False)
                 res = await self.engines["vector"].search_similar(
                     collection=target, query_text=q,
                     threshold=t, limit=lim, tenant_id=tenant_id)
-                return [{"id": r.get("id", ""), "content": r.get("payload", {}).get("content", ""),
-                         "score": r.get("score", 0.0), "doc_id": r.get("payload", {}).get("doc_id", ""),
-                         "chunk_index": r.get("payload", {}).get("chunk_index", 0),
-                         "start_char": r.get("payload", {}).get("start_char", 0),
-                         "parent_id": r.get("payload", {}).get("parent_id"),
-                         "level": r.get("payload", {}).get("level", "flat"),
-                         "metadata": r.get("payload", {})} for r in res]
+                results = [{"id": r.get("id", ""), "content": r.get("payload", {}).get("content", ""),
+                            "score": r.get("score", 0.0), "doc_id": r.get("payload", {}).get("doc_id", ""),
+                            "chunk_index": r.get("payload", {}).get("chunk_index", 0),
+                            "start_char": r.get("payload", {}).get("start_char", 0),
+                            "parent_id": r.get("payload", {}).get("parent_id"),
+                            "level": r.get("payload", {}).get("level", "flat"),
+                            "metadata": r.get("payload", {})} for r in res]
+                # Filter low-scoring results when narrow strategy requests it
+                if do_filter and results:
+                    median_score = sorted([r["score"] for r in results])[len(results) // 2]
+                    results = [r for r in results if r["score"] >= median_score * 0.8]
+                return results
 
             feedback_result = await self.retrieval_feedback.adaptive_search(
                 query, _search_fn, threshold=search_threshold, limit=search_limit)
@@ -427,9 +433,9 @@ class RAGPipeline:
                                 "parent_count": len(parents)}),
                     tenant_id, hashlib.sha256(text.encode()).hexdigest())
 
-        # Embed child chunks (small, precise)
+        # Embed child chunks (run in thread to avoid blocking event loop)
         child_texts = [c.content for c in children]
-        child_vectors = self.embedding.embed_batch(child_texts)
+        child_vectors = await asyncio.to_thread(self.embedding.embed_batch, child_texts)
 
         # Store children in Qdrant for vector search
         target = f"tenant_{tenant_id}_{collection}" if tenant_id else collection
@@ -454,43 +460,36 @@ class RAGPipeline:
                 })
             await self.engines["vector"].upsert_vectors(target, points)
 
-        # Store both parents and children in PG
+        # Store both parents and children in PG (batch inserts)
         if "relational" in self.engines:
             pool = self.engines["relational"].pool
             async with pool.acquire() as conn:
-                # Store parent chunks
+                # Batch insert all chunks (parents + children)
+                all_chunk_rows = []
                 for parent in parents:
-                    await conn.execute("""
-                        INSERT INTO rag_chunks (chunk_id, doc_id, content,
-                            chunk_index, start_char, end_char, token_count,
-                            metadata, tenant_id)
-                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9)
-                        ON CONFLICT (chunk_id) DO UPDATE SET
-                            content=$3, token_count=$7, metadata=$8::jsonb
-                    """, parent.chunk_id, doc_id, parent.content,
+                    all_chunk_rows.append((
+                        parent.chunk_id, doc_id, parent.content,
                         parent.chunk_index, parent.start_char, parent.end_char,
                         parent.token_count,
                         json.dumps({**(parent.metadata or {}),
-                                    "level": "parent",
-                                    "children": parent.children}),
-                        tenant_id)
-
-                # Store child chunks
+                                    "level": "parent", "children": parent.children}),
+                        tenant_id))
                 for child in children:
-                    await conn.execute("""
-                        INSERT INTO rag_chunks (chunk_id, doc_id, content,
-                            chunk_index, start_char, end_char, token_count,
-                            metadata, tenant_id)
-                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9)
-                        ON CONFLICT (chunk_id) DO UPDATE SET
-                            content=$3, token_count=$7, metadata=$8::jsonb
-                    """, child.chunk_id, doc_id, child.content,
+                    all_chunk_rows.append((
+                        child.chunk_id, doc_id, child.content,
                         child.chunk_index, child.start_char, child.end_char,
                         child.token_count,
                         json.dumps({**(child.metadata or {}),
-                                    "level": "child",
-                                    "parent_id": child.parent_id}),
-                        tenant_id)
+                                    "level": "child", "parent_id": child.parent_id}),
+                        tenant_id))
+                await conn.executemany("""
+                    INSERT INTO rag_chunks (chunk_id, doc_id, content,
+                        chunk_index, start_char, end_char, token_count,
+                        metadata, tenant_id)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9)
+                    ON CONFLICT (chunk_id) DO UPDATE SET
+                        content=$3, token_count=$7, metadata=$8::jsonb
+                """, all_chunk_rows)
 
         self._ingest_count += 1
         return {

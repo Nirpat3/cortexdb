@@ -47,14 +47,15 @@ class HybridSearch:
         self.engines = engines
         self.embedding = embedding
         self._reranker = None
+        self._reranker_checked = False  # True after first attempt
         self._reranker_available = False
         self._search_count = 0
 
-        # Try loading cross-encoder for re-ranking
-        self._load_reranker()
-
-    def _load_reranker(self):
-        """Lazy-load cross-encoder re-ranker model."""
+    def _ensure_reranker(self):
+        """Lazy-load cross-encoder on first use (not at init, to avoid blocking startup)."""
+        if self._reranker_checked:
+            return
+        self._reranker_checked = True
         try:
             from sentence_transformers import CrossEncoder
             self._reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
@@ -101,7 +102,9 @@ class HybridSearch:
         # Fuse with Reciprocal Rank Fusion
         fused = self._rrf_fuse(dense_results, sparse_results, dense_weight, sparse_weight)
 
-        # Optional cross-encoder re-ranking
+        # Optional cross-encoder re-ranking (lazy-loaded on first use)
+        if rerank and fused:
+            self._ensure_reranker()
         if rerank and self._reranker_available and fused:
             fused = self._rerank(query, fused[:rerank_top_k])
 
