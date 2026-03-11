@@ -53,6 +53,7 @@ class SleepCycleScheduler:
         self._tasks: List[SleepCycleTask] = []
         self._running = False
         self._last_result: Optional[SleepCycleResult] = None
+        self._run_lock = asyncio.Lock()
         self._register_default_tasks()
 
     def _register_default_tasks(self):
@@ -68,51 +69,46 @@ class SleepCycleScheduler:
 
     async def run(self) -> SleepCycleResult:
         """Execute the full sleep cycle (lock-guarded against concurrent runs)."""
-        if not hasattr(self, '_run_lock'):
-            self._run_lock = asyncio.Lock()
-        if self._running:
+        if self._run_lock.locked():
             logger.warning("Sleep cycle already running, skipping")
             return SleepCycleResult(started_at=time.time(),
                                     details={"skipped": "already_running"})
 
         async with self._run_lock:
-            if self._running:
-                return SleepCycleResult(started_at=time.time(),
-                                        details={"skipped": "already_running"})
             self._running = True
+            result = SleepCycleResult(started_at=time.time())
+            logger.info("Sleep cycle STARTED")
 
-        result = SleepCycleResult(started_at=time.time())
-        logger.info("Sleep cycle STARTED")
-
-        for task in sorted(self._tasks, key=lambda t: t.order):
-            if not task.enabled:
-                continue
-            start = time.perf_counter()
             try:
-                detail = await task.handler()
-                task.last_duration_ms = (time.perf_counter() - start) * 1000
-                task.last_run = time.time()
-                task.last_error = None
-                task.run_count += 1
-                result.tasks_run += 1
-                result.details[task.name] = {
-                    "status": "ok", "duration_ms": round(task.last_duration_ms, 1),
-                    "detail": detail}
-                logger.info(f"  Sleep [{task.name}]: {task.last_duration_ms:.0f}ms")
-            except Exception as e:
-                task.last_error = str(e)
-                result.tasks_failed += 1
-                result.details[task.name] = {"status": "error", "error": str(e)}
-                logger.error(f"  Sleep [{task.name}] FAILED: {e}")
+                for task in sorted(self._tasks, key=lambda t: t.order):
+                    if not task.enabled:
+                        continue
+                    start = time.perf_counter()
+                    try:
+                        detail = await task.handler()
+                        task.last_duration_ms = (time.perf_counter() - start) * 1000
+                        task.last_run = time.time()
+                        task.last_error = None
+                        task.run_count += 1
+                        result.tasks_run += 1
+                        result.details[task.name] = {
+                            "status": "ok", "duration_ms": round(task.last_duration_ms, 1),
+                            "detail": detail}
+                        logger.info(f"  Sleep [{task.name}]: {task.last_duration_ms:.0f}ms")
+                    except Exception as e:
+                        task.last_error = str(e)
+                        result.tasks_failed += 1
+                        result.details[task.name] = {"status": "error", "error": str(e)}
+                        logger.error(f"  Sleep [{task.name}] FAILED: {e}")
 
-        result.completed_at = time.time()
-        async with self._run_lock:
-            self._running = False
-        self._last_result = result
-        duration = result.completed_at - result.started_at
-        logger.info(f"Sleep cycle COMPLETED: {result.tasks_run} ok, "
-                     f"{result.tasks_failed} failed, {duration:.1f}s total")
-        return result
+                result.completed_at = time.time()
+                self._last_result = result
+                duration = result.completed_at - result.started_at
+                logger.info(f"Sleep cycle COMPLETED: {result.tasks_run} ok, "
+                             f"{result.tasks_failed} failed, {duration:.1f}s total")
+            finally:
+                self._running = False
+            return result
 
     # -- Built-in tasks --
 

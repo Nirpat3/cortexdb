@@ -121,7 +121,7 @@ class HybridSearch:
         if rerank and fused:
             await self._ensure_reranker()
         if rerank and self._reranker_available and fused:
-            fused = self._rerank(query, fused[:rerank_top_k])
+            fused = await self._rerank(query, fused[:rerank_top_k])
 
         return fused[:limit]
 
@@ -256,14 +256,14 @@ class HybridSearch:
         results.sort(key=lambda r: r.score, reverse=True)
         return results
 
-    def _rerank(self, query: str, candidates: List[SearchResult]) -> List[SearchResult]:
+    async def _rerank(self, query: str, candidates: List[SearchResult]) -> List[SearchResult]:
         """Re-rank candidates using cross-encoder model."""
         if not candidates or not self._reranker:
             return candidates
 
         pairs = [(query, c.content) for c in candidates]
         try:
-            rerank_scores = self._reranker.predict(pairs)
+            rerank_scores = await asyncio.to_thread(self._reranker.predict, pairs)
             for candidate, score in zip(candidates, rerank_scores):
                 candidate.rerank_score = float(score)
 

@@ -132,7 +132,9 @@ class TenantManager:
 
     @staticmethod
     def _hash_api_key(api_key: str, salt: str = "") -> str:
-        return hashlib.sha256((salt + api_key).encode()).hexdigest()
+        return hashlib.pbkdf2_hmac(
+            'sha256', api_key.encode(), salt.encode(), iterations=100000
+        ).hex()
 
     @staticmethod
     def _generate_salt() -> str:
@@ -217,10 +219,20 @@ class TenantManager:
             except Exception as e:
                 logger.warning(f"ImmutableCore genesis for {tid}: {e}")
 
-    async def _update_tenant_status(self, tenant_id: str, status: str, extra_sql: str = ""):
+    _ALLOWED_TIMESTAMP_FIELDS = frozenset({"activated_at", "deactivated_at", "suspended_at"})
+
+    async def _update_tenant_status(self, tenant_id: str, status: str,
+                                     set_timestamp_field: str = None):
         """Write-through: update PG first, then in-memory cache."""
         if "relational" in self.engines:
-            sql = f"UPDATE tenants SET status = $1{extra_sql} WHERE tenant_id = $2"
+            if set_timestamp_field:
+                if set_timestamp_field not in self._ALLOWED_TIMESTAMP_FIELDS:
+                    raise ValueError(
+                        f"Invalid timestamp field: {set_timestamp_field}. "
+                        f"Allowed: {sorted(self._ALLOWED_TIMESTAMP_FIELDS)}")
+                sql = f"UPDATE tenants SET status = $1, {set_timestamp_field} = NOW() WHERE tenant_id = $2"
+            else:
+                sql = "UPDATE tenants SET status = $1 WHERE tenant_id = $2"
             params = [status, tenant_id]
             try:
                 await self.engines["relational"].execute(sql, params)
@@ -233,7 +245,7 @@ class TenantManager:
         if not tenant:
             raise ValueError(f"Tenant {tenant_id} not found")
         await self._update_tenant_status(
-            tenant_id, "active", ", activated_at = NOW()")
+            tenant_id, "active", set_timestamp_field="activated_at")
         tenant.status = TenantStatus.ACTIVE
         tenant.activated_at = time.time()
 
@@ -250,7 +262,7 @@ class TenantManager:
         if not tenant:
             raise ValueError(f"Tenant {tenant_id} not found")
         await self._update_tenant_status(
-            tenant_id, "offboarding", ", deactivated_at = NOW()")
+            tenant_id, "offboarding", set_timestamp_field="deactivated_at")
         tenant.status = TenantStatus.OFFBOARDING
 
     async def export_data(self, tenant_id: str) -> Dict:

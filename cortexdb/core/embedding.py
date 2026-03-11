@@ -8,12 +8,14 @@ Falls back to hash-based pseudo-embeddings if model not available.
 import hashlib
 import logging
 import struct
+import threading
 from typing import List, Optional
 
 logger = logging.getLogger("cortexdb.core.embedding")
 
 _model = None
 _model_available = False
+_load_lock = threading.Lock()
 
 
 def _load_model():
@@ -21,16 +23,19 @@ def _load_model():
     global _model, _model_available
     if _model is not None:
         return
+    with _load_lock:
+        if _model is not None:
+            return
 
-    try:
-        from sentence_transformers import SentenceTransformer
-        _model = SentenceTransformer("all-MiniLM-L6-v2")
-        _model_available = True
-        logger.info("Embedding model loaded: all-MiniLM-L6-v2 (384 dims)")
-    except ImportError:
-        _model_available = False
-        logger.info("sentence-transformers not installed — using hash-based pseudo-embeddings. "
-                     "Install: pip install sentence-transformers")
+        try:
+            from sentence_transformers import SentenceTransformer
+            _model = SentenceTransformer("all-MiniLM-L6-v2")
+            _model_available = True
+            logger.info("Embedding model loaded: all-MiniLM-L6-v2 (384 dims)")
+        except ImportError:
+            _model_available = False
+            logger.info("sentence-transformers not installed — using hash-based pseudo-embeddings. "
+                         "Install: pip install sentence-transformers")
 
 
 class EmbeddingPipeline:

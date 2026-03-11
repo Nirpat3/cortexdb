@@ -401,25 +401,52 @@ class A2AProtocol:
         # When PG is available, query it for the authoritative list
         if self._pool:
             try:
-                clauses = []
-                params = []
-                idx = 1
                 if agent_id:
-                    clauses.append(f"(requester_agent=${idx} OR assigned_agent=${idx})")
-                    params.append(agent_id)
-                    idx += 1
-                if status:
-                    clauses.append(f"status=${idx}")
-                    params.append(status)
-                    idx += 1
-                if tenant_id:
-                    clauses.append(f"tenant_id=${idx}")
-                    params.append(tenant_id)
-                    idx += 1
-                where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-                query = (f"SELECT * FROM a2a_tasks{where} "
-                         f"ORDER BY created_at DESC LIMIT ${idx}")
-                params.append(limit)
+                    # Use UNION ALL of two indexed queries instead of OR
+                    # to allow index usage on requester_agent and assigned_agent
+                    extra_clauses_req = []
+                    extra_clauses_asg = []
+                    params = [agent_id]
+                    idx = 2
+                    if status:
+                        extra_clauses_req.append(f"status=${idx}")
+                        extra_clauses_asg.append(f"status=${idx}")
+                        params.append(status)
+                        idx += 1
+                    if tenant_id:
+                        extra_clauses_req.append(f"tenant_id=${idx}")
+                        extra_clauses_asg.append(f"tenant_id=${idx}")
+                        params.append(tenant_id)
+                        idx += 1
+                    params.append(limit)
+                    limit_param = f"${idx}"
+                    req_where = " AND ".join(["requester_agent=$1"] + extra_clauses_req)
+                    asg_where = " AND ".join(["assigned_agent=$1"] + extra_clauses_asg)
+                    query = (
+                        f"(SELECT * FROM a2a_tasks WHERE {req_where} "
+                        f"ORDER BY created_at DESC LIMIT {limit_param}) "
+                        f"UNION ALL "
+                        f"(SELECT * FROM a2a_tasks WHERE {asg_where} "
+                        f"AND requester_agent != $1 "
+                        f"ORDER BY created_at DESC LIMIT {limit_param}) "
+                        f"ORDER BY created_at DESC LIMIT {limit_param}"
+                    )
+                else:
+                    clauses = []
+                    params = []
+                    idx = 1
+                    if status:
+                        clauses.append(f"status=${idx}")
+                        params.append(status)
+                        idx += 1
+                    if tenant_id:
+                        clauses.append(f"tenant_id=${idx}")
+                        params.append(tenant_id)
+                        idx += 1
+                    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+                    query = (f"SELECT * FROM a2a_tasks{where} "
+                             f"ORDER BY created_at DESC LIMIT ${idx}")
+                    params.append(limit)
                 async with self._pool.acquire() as conn:
                     rows = await conn.fetch(query, *params)
                 results = []

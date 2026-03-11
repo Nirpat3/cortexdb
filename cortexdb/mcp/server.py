@@ -53,8 +53,9 @@ class CortexMCPServer:
         result = await mcp.call_tool("cortexdb.query", {"cortexql": "SELECT * FROM blocks"})
     """
 
-    def __init__(self, db=None):
+    def __init__(self, db=None, default_tenant_id: Optional[str] = None):
         self.db = db
+        self.default_tenant_id = default_tenant_id
         self._tools: Dict[str, MCPToolDefinition] = {}
         self._cortexgraph = None
         self._register_tools()
@@ -271,6 +272,14 @@ class CortexMCPServer:
 
         args = arguments or {}
 
+        # Enforce tenant_id: use provided, fall back to default, or reject
+        if not args.get("tenant_id"):
+            if self.default_tenant_id:
+                args["tenant_id"] = self.default_tenant_id
+            else:
+                return MCPToolResult(is_error=True,
+                                    error_message="tenant_id is required but was not provided")
+
         # Route CortexGraph tools
         if tool_name.startswith("cortexgraph."):
             return await self._handle_cortexgraph_tool(tool_name, args)
@@ -303,7 +312,7 @@ class CortexMCPServer:
                 block_type = args.get("block_type")
                 if block_type:
                     if not all(c.isalnum() or c in '-_' for c in str(block_type)):
-                        return MCPToolResult(content={"error": "Invalid block_type"})
+                        return MCPToolResult(is_error=True, error_message="Invalid block_type")
                     params.append(str(block_type))
                     query += f" AND block_type = ${len(params)}"
                 limit = max(1, min(int(args.get("limit", 50)), 500))
@@ -319,7 +328,7 @@ class CortexMCPServer:
                 if state:
                     valid = {"idle", "running", "paused", "stopped", "error", "active"}
                     if str(state) not in valid:
-                        return MCPToolResult(content={"error": f"Invalid state: {valid}"})
+                        return MCPToolResult(is_error=True, error_message=f"Invalid state: {valid}")
                     params.append(str(state))
                     query += f" WHERE state = ${len(params)}"
                 limit = max(1, min(int(args.get("limit", 50)), 500))
@@ -334,7 +343,7 @@ class CortexMCPServer:
                     return MCPToolResult(content={
                         "chain_intact": intact,
                         "entries": len(self.db.engines["immutable"]._chain)})
-                return MCPToolResult(content={"error": "ImmutableCore not connected"})
+                return MCPToolResult(is_error=True, error_message="ImmutableCore not connected")
 
             elif tool_name == "cortexdb.cache.stats":
                 stats = self.db.read_cascade.stats if self.db.read_cascade else {}

@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from cortexdb.core.cache_config import SemanticCacheConfig, CollectionCacheConfig
+from cortexdb.observability.tracing import trace_span
 
 logger = logging.getLogger("cortexdb")
 
@@ -389,14 +390,15 @@ class ReadCascade:
             # Store the pre-computed copy to prevent callers from mutating cached data
             self._r0_cache[key] = value_copy
 
-    def invalidate_tenant_cache(self, tenant_id: str):
+    async def invalidate_tenant_cache(self, tenant_id: str):
         """Evict all R0 cache entries for a specific tenant after writes."""
         if not tenant_id:
             return
         prefix = f"tenant:{tenant_id}:"
-        keys_to_evict = [k for k in self._r0_cache if k.startswith(prefix)]
-        for k in keys_to_evict:
-            self._r0_cache.pop(k, None)  # pop() is safe if key was evicted concurrently
+        async with self._r0_lock:
+            keys_to_evict = [k for k in self._r0_cache if k.startswith(prefix)]
+            for k in keys_to_evict:
+                self._r0_cache.pop(k, None)
         if keys_to_evict:
             logger.debug("R0 cache: evicted %d entries for tenant %s", len(keys_to_evict), tenant_id)
 
@@ -562,6 +564,10 @@ class WriteFanOut:
                         self._tracked_async_write(task_id, engine_name, data_type, write_payload, actor))
                     self._pending_tasks[task_id] = task
 
+        # Periodic cleanup of completed background tasks to prevent unbounded growth
+        if len(self._pending_tasks) > 100:
+            self._cleanup_completed_tasks()
+
         results["latency_ms"] = (time.perf_counter() - start) * 1000
 
         # Report which fields were encrypted in the result
@@ -601,7 +607,7 @@ class WriteFanOut:
 
         # Evict R0 entries for the affected tenant to prevent stale reads
         if tenant_id and hasattr(self, '_read_cascade') and self._read_cascade:
-            self._read_cascade.invalidate_tenant_cache(tenant_id)
+            await self._read_cascade.invalidate_tenant_cache(tenant_id)
 
         return results
 
@@ -899,48 +905,49 @@ class CortexDB:
             raise RuntimeError("CortexDB not connected. Call await db.connect() first.")
         self._query_count += 1
 
-        # Amygdala security check
-        verdict = self.amygdala.assess(cortexql, actor="query")
-        if not verdict.allowed:
-            return QueryResult(
-                data={"error": "BLOCKED_BY_AMYGDALA", "threats": verdict.threats_detected},
-                tier_served=CacheTier.R0_PROCESS, engines_hit=["amygdala"],
-                metadata={"security_verdict": verdict.__dict__})
+        with trace_span("CortexDB.query", attributes={"tenant_id": tenant_id or ""}):
+            # Amygdala security check
+            verdict = self.amygdala.assess(cortexql, actor="query")
+            if not verdict.allowed:
+                return QueryResult(
+                    data={"error": "BLOCKED_BY_AMYGDALA", "threats": verdict.threats_detected},
+                    tier_served=CacheTier.R0_PROCESS, engines_hit=["amygdala"],
+                    metadata={"security_verdict": verdict.__dict__})
 
-        # Parse query to determine routing
-        if self.parser:
-            parsed = self.parser.parse(cortexql)
-            engine_name = parsed.engine
+            # Parse query to determine routing
+            if self.parser:
+                parsed = self.parser.parse(cortexql)
+                engine_name = parsed.engine
 
-            # Route to specific engine for CortexQL extensions
-            if parsed.query_type.value == "vector" and "vector" in self.engines:
-                text = parsed.parameters.get("search_text", cortexql)
-                collection = parsed.collection or "default"
-                if tenant_id:
-                    collection = f"tenant_{tenant_id}_{collection}"
-                try:
-                    data = await self.engines["vector"].search_similar(
-                        collection=collection, query_text=text, limit=10)
-                    result = QueryResult(data=data, tier_served=CacheTier.R3_PERSISTENT,
-                                         engines_hit=["vector_core"],
-                                         latency_ms=0, cache_hit=False)
-                    return result
-                except Exception as e:
-                    logger.warning(f"VectorCore query failed: {e}")
+                # Route to specific engine for CortexQL extensions
+                if parsed.query_type.value == "vector" and "vector" in self.engines:
+                    text = parsed.parameters.get("search_text", cortexql)
+                    collection = parsed.collection or "default"
+                    if tenant_id:
+                        collection = f"tenant_{tenant_id}_{collection}"
+                    try:
+                        data = await self.engines["vector"].search_similar(
+                            collection=collection, query_text=text, limit=10)
+                        result = QueryResult(data=data, tier_served=CacheTier.R3_PERSISTENT,
+                                             engines_hit=["vector_core"],
+                                             latency_ms=0, cache_hit=False)
+                        return result
+                    except Exception as e:
+                        logger.warning(f"VectorCore query failed: {e}")
 
-            elif parsed.query_type.value == "graph" and "graph" in self.engines:
-                try:
-                    data = await self.engines["graph"].execute(cortexql, params)
-                    return QueryResult(data=data, tier_served=CacheTier.R3_PERSISTENT,
-                                       engines_hit=["graph_core"], cache_hit=False)
-                except Exception as e:
-                    logger.warning(f"GraphCore query failed: {e}")
+                elif parsed.query_type.value == "graph" and "graph" in self.engines:
+                    try:
+                        data = await self.engines["graph"].execute(cortexql, params)
+                        return QueryResult(data=data, tier_served=CacheTier.R3_PERSISTENT,
+                                           engines_hit=["graph_core"], cache_hit=False)
+                    except Exception as e:
+                        logger.warning(f"GraphCore query failed: {e}")
 
-        # Default: Read Cascade
-        result = await self.read_cascade.read(cortexql, params, hint, tenant_id)
-        qhash = hashlib.sha256(cortexql.encode()).hexdigest()[:16]
-        self.plasticity.strengthen(qhash, result.engines_hit, result.latency_ms)
-        return result
+            # Default: Read Cascade
+            result = await self.read_cascade.read(cortexql, params, hint, tenant_id)
+            qhash = hashlib.sha256(cortexql.encode()).hexdigest()[:16]
+            self.plasticity.strengthen(qhash, result.engines_hit, result.latency_ms)
+            return result
 
     async def write(self, data_type: str, payload: Dict,
                     actor: str = "system",
@@ -948,14 +955,15 @@ class CortexDB:
         if not self._connected:
             raise RuntimeError("CortexDB not connected.")
 
-        # Inject tenant_id into payload for RLS
-        if tenant_id:
-            payload["tenant_id"] = tenant_id
+        with trace_span("CortexDB.write", attributes={"tenant_id": tenant_id or "", "data_type": data_type}):
+            # Inject tenant_id into payload for RLS
+            if tenant_id:
+                payload["tenant_id"] = tenant_id
 
-        verdict = self.amygdala.assess(json.dumps(payload, default=str), actor)
-        if not verdict.allowed:
-            raise PermissionError(f"Write blocked by Amygdala: {verdict.threats_detected}")
-        return await self.write_fanout.write(data_type, payload, actor, tenant_id=tenant_id)
+            verdict = self.amygdala.assess(json.dumps(payload, default=str), actor)
+            if not verdict.allowed:
+                raise PermissionError(f"Write blocked by Amygdala: {verdict.threats_detected}")
+            return await self.write_fanout.write(data_type, payload, actor, tenant_id=tenant_id)
 
     async def health(self) -> Dict:
         health = {

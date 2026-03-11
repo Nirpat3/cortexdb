@@ -92,15 +92,22 @@ class MetricsCollector:
             f"# Uptime: {time.time() - self._start_time:.0f}s",
             "",
         ]
+        emitted_types = set()
 
         # Counters
         for key, val in sorted(self._counters.items()):
-            lines.append(f"# TYPE {key.split('{')[0]} counter")
+            base = key.split("{")[0]
+            if base not in emitted_types:
+                lines.append(f"# TYPE {base} counter")
+                emitted_types.add(base)
             lines.append(f"{key} {val}")
 
         # Gauges
         for key, val in sorted(self._gauges.items()):
-            lines.append(f"# TYPE {key.split('{')[0]} gauge")
+            base = key.split("{")[0]
+            if base not in emitted_types:
+                lines.append(f"# TYPE {base} gauge")
+                emitted_types.add(base)
             lines.append(f"{key} {val}")
 
         # Histograms (summary with percentiles)
@@ -111,12 +118,19 @@ class MetricsCollector:
             n = len(sorted_vals)
             base = key.split("{")[0]
             labels = key[len(base):]
-            lines.append(f"# TYPE {base} summary")
+            if base not in emitted_types:
+                lines.append(f"# TYPE {base} summary")
+                emitted_types.add(base)
             lines.append(f"{base}_count{labels} {n}")
             lines.append(f"{base}_sum{labels} {sum(sorted_vals):.3f}")
             for q in [0.5, 0.95, 0.99]:
                 idx = min(int(n * q), n - 1)
-                lines.append(f'{base}{{quantile="{q}",{labels[1:] if labels else "}"} {sorted_vals[idx]:.3f}')
+                if labels:
+                    # labels is like '{foo="bar"}' — strip trailing } and append quantile
+                    inner = labels[1:-1]  # foo="bar"
+                    lines.append(f'{base}{{quantile="{q}",{inner}}} {sorted_vals[idx]:.3f}')
+                else:
+                    lines.append(f'{base}{{quantile="{q}"}} {sorted_vals[idx]:.3f}')
 
         return "\n".join(lines) + "\n"
 

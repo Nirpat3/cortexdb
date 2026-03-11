@@ -47,6 +47,11 @@ def embed_text(text: str) -> List[float]:
     return _get_pipeline().embed(text)
 
 
+def embed_batch(texts: List[str]) -> List[List[float]]:
+    """Embed multiple texts in a single batch via the unified EmbeddingPipeline."""
+    return _get_pipeline().embed_batch(texts)
+
+
 class VectorEngine(BaseEngine):
     def __init__(self, config: Dict):
         self.url = config.get("url", "http://localhost:6333")
@@ -155,13 +160,28 @@ class VectorEngine(BaseEngine):
         """Insert or update vectors. Each point: {id, text_or_vector, payload}."""
         await self._ensure_collection(collection)
 
+        # Collect texts that need embedding for a single batch call
+        texts_to_embed = []
+        text_indices = []  # index into `points` for each text
+        for i, p in enumerate(points):
+            if "vector" not in p and "text" in p:
+                texts_to_embed.append(p["text"])
+                text_indices.append(i)
+
+        # Batch embed all texts at once
+        if texts_to_embed:
+            batch_vectors = await asyncio.to_thread(embed_batch, texts_to_embed)
+            text_vector_map = dict(zip(text_indices, batch_vectors))
+        else:
+            text_vector_map = {}
+
         qdrant_points = []
         skipped = 0
-        for p in points:
+        for i, p in enumerate(points):
             if "vector" in p:
                 vec = p["vector"]
-            elif "text" in p:
-                vec = await asyncio.to_thread(embed_text, p["text"])
+            elif i in text_vector_map:
+                vec = text_vector_map[i]
             else:
                 skipped += 1
                 logger.warning(f"upsert_vectors: point missing 'vector' and 'text', skipped. Keys: {list(p.keys())}")

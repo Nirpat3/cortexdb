@@ -221,30 +221,36 @@ class RAGPipeline:
         all_results = []
         seen_ids = set()
 
-        for variant in query_variants[:5]:  # cap at 5 variants
+        async def _search_variant(variant):
             try:
-                results = await self.engines["vector"].search_similar(
+                return await self.engines["vector"].search_similar(
                     collection=target, query_text=variant,
                     threshold=search_threshold, limit=search_limit,
                     tenant_id=tenant_id)
-                for r in results:
-                    rid = r.get("id", "")
-                    if rid not in seen_ids:
-                        seen_ids.add(rid)
-                        payload = r.get("payload", {})
-                        all_results.append({
-                            "id": rid,
-                            "content": payload.get("content", ""),
-                            "score": r.get("score", 0.0),
-                            "doc_id": payload.get("doc_id", ""),
-                            "chunk_index": payload.get("chunk_index", 0),
-                            "start_char": payload.get("start_char", 0),
-                            "parent_id": payload.get("parent_id"),
-                            "level": payload.get("level", "flat"),
-                            "metadata": payload,
-                        })
             except Exception as e:
                 logger.warning("Variant search failed for %r: %s", variant[:50], e)
+                return []
+
+        variant_results = await asyncio.gather(
+            *[_search_variant(v) for v in query_variants[:5]])
+
+        for results in variant_results:
+            for r in results:
+                rid = r.get("id", "")
+                if rid not in seen_ids:
+                    seen_ids.add(rid)
+                    payload = r.get("payload", {})
+                    all_results.append({
+                        "id": rid,
+                        "content": payload.get("content", ""),
+                        "score": r.get("score", 0.0),
+                        "doc_id": payload.get("doc_id", ""),
+                        "chunk_index": payload.get("chunk_index", 0),
+                        "start_char": payload.get("start_char", 0),
+                        "parent_id": payload.get("parent_id"),
+                        "level": payload.get("level", "flat"),
+                        "metadata": payload,
+                    })
 
         # Sort by score descending
         all_results.sort(key=lambda r: r["score"], reverse=True)

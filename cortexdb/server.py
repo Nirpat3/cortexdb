@@ -33,6 +33,7 @@ from cortexdb.tenant.middleware import TenantMiddleware, get_current_tenant
 from cortexdb.rate_limit.limiter import RateLimiter
 from cortexdb.rate_limit.middleware import RateLimitMiddleware
 from cortexdb.observability.metrics import MetricsCollector
+from cortexdb.observability.tracing import trace_span
 from cortexdb.mcp.server import CortexMCPServer
 from cortexdb.a2a.registry import A2ARegistry, AgentCard
 from cortexdb.a2a.protocol import A2AProtocol
@@ -363,30 +364,32 @@ class MCPToolCallRequest(BaseModel):
 @app.post("/v1/query", response_model=QueryResponse)
 async def cortexql_query(req: QueryRequest, request: Request):
     tid = _tenant_id(request)
-    result = await db.query(req.cortexql, req.params, req.hint, tenant_id=tid)
-    if metrics:
-        metrics.record_query(result.tier_served.value, result.latency_ms, result.cache_hit, tid)
-    # Return 403 if blocked by Amygdala
-    if isinstance(result.data, dict) and result.data.get("error") == "BLOCKED_BY_AMYGDALA":
-        raise HTTPException(403, detail={
-            "error": "blocked_by_amygdala",
-            "threats": result.data.get("threats", []),
-        })
-    return QueryResponse(data=result.data, tier_served=result.tier_served.value,
-                         engines_hit=result.engines_hit, latency_ms=round(result.latency_ms, 3),
-                         cache_hit=result.cache_hit, metadata=result.metadata)
+    with trace_span("cortexql_query", attributes={"tenant_id": tid or ""}):
+        result = await db.query(req.cortexql, req.params, req.hint, tenant_id=tid)
+        if metrics:
+            metrics.record_query(result.tier_served.value, result.latency_ms, result.cache_hit, tid)
+        # Return 403 if blocked by Amygdala
+        if isinstance(result.data, dict) and result.data.get("error") == "BLOCKED_BY_AMYGDALA":
+            raise HTTPException(403, detail={
+                "error": "blocked_by_amygdala",
+                "threats": result.data.get("threats", []),
+            })
+        return QueryResponse(data=result.data, tier_served=result.tier_served.value,
+                             engines_hit=result.engines_hit, latency_ms=round(result.latency_ms, 3),
+                             cache_hit=result.cache_hit, metadata=result.metadata)
 
 @app.post("/v1/write")
 async def cortexql_write(req: WriteRequest, request: Request):
     tid = _tenant_id(request)
-    try:
-        result = await db.write(req.data_type, req.payload, req.actor, tenant_id=tid)
-    except PermissionError as e:
-        raise HTTPException(403, detail={"error": "blocked_by_amygdala", "message": str(e)})
-    if metrics:
-        metrics.record_write(req.data_type, result.get("latency_ms", 0),
-                             len(result.get("sync", {})), len(result.get("async", {})))
-    return {"status": "success", "fan_out": result}
+    with trace_span("cortexql_write", attributes={"tenant_id": tid or "", "data_type": req.data_type}):
+        try:
+            result = await db.write(req.data_type, req.payload, req.actor, tenant_id=tid)
+        except PermissionError as e:
+            raise HTTPException(403, detail={"error": "blocked_by_amygdala", "message": str(e)})
+        if metrics:
+            metrics.record_write(req.data_type, result.get("latency_ms", 0),
+                                 len(result.get("sync", {})), len(result.get("async", {})))
+        return {"status": "success", "fan_out": result}
 
 
 # -- Health Endpoints (DOC-014 + DOC-019) --
@@ -678,7 +681,9 @@ async def list_agents(request: Request, state: Optional[str] = None, limit: int 
 # -- Grid Endpoints (DOC-015) --
 
 @app.get("/v1/grid/nodes")
-async def list_grid_nodes(state: Optional[str] = None):
+async def list_grid_nodes(request: Request, state: Optional[str] = None):
+    denied = _require_admin(request)
+    if denied: return denied
     nodes = grid_sm.active_nodes if grid_sm else []
     if state: nodes = [n for n in nodes if n.state.value == state]
     return {"nodes": [{"node_id": n.node_id, "grid_address": n.grid_address,
@@ -690,7 +695,9 @@ async def list_grid_nodes(state: Optional[str] = None):
                       for n in nodes], "total": len(nodes)}
 
 @app.get("/v1/grid/health-scores")
-async def grid_health_scores():
+async def grid_health_scores(request: Request):
+    denied = _require_admin(request)
+    if denied: return denied
     if not grid_sm or not health_scorer: return {"distribution": {}}
     scores = {}
     for node in grid_sm.active_nodes:
@@ -700,23 +707,31 @@ async def grid_health_scores():
     return {"distribution": scores}
 
 @app.get("/v1/grid/cemetery")
-async def grid_cemetery():
+async def grid_cemetery(request: Request):
+    denied = _require_admin(request)
+    if denied: return denied
     return {"reports": coroner.get_reports() if coroner else [],
             "analytics": coroner.get_death_analytics() if coroner else {}}
 
 @app.get("/v1/grid/ggc/stats")
-async def ggc_stats():
+async def ggc_stats(request: Request):
+    denied = _require_admin(request)
+    if denied: return denied
     return ggc.get_stats() if ggc else {}
 
 @app.get("/v1/grid/resurrections")
-async def resurrection_events():
+async def resurrection_events(request: Request):
+    denied = _require_admin(request)
+    if denied: return denied
     return {"events": resurrection.get_events() if resurrection else []}
 
 
 # -- ASA Endpoints (DOC-015) --
 
 @app.get("/v1/asa/standards")
-async def list_standards(category: Optional[str] = None):
+async def list_standards(request: Request, category: Optional[str] = None):
+    denied = _require_admin(request)
+    if denied: return denied
     standards = asa.get_all_standards(category=category) if asa else []
     return {"standards": [{"standard_id": s.standard_id, "category": s.category,
                            "title": s.title, "description": s.description,
@@ -724,7 +739,9 @@ async def list_standards(category: Optional[str] = None):
                           for s in standards]}
 
 @app.get("/v1/asa/violations")
-async def list_violations():
+async def list_violations(request: Request):
+    denied = _require_admin(request)
+    if denied: return denied
     return {"violations": asa.get_violations() if asa else [],
             "stats": asa.get_violation_stats() if asa else {}}
 
@@ -732,16 +749,22 @@ async def list_violations():
 # -- Heartbeat Endpoints (DOC-014) --
 
 @app.get("/v1/heartbeat/status")
-async def heartbeat_status():
+async def heartbeat_status(request: Request):
+    denied = _require_admin(request)
+    if denied: return denied
     return heartbeat.get_status() if heartbeat else {}
 
 @app.get("/v1/heartbeat/circuit-breakers")
-async def circuit_breaker_status():
+async def circuit_breaker_status(request: Request):
+    denied = _require_admin(request)
+    if denied: return denied
     return {"breakers": circuits.get_all_status() if circuits else [],
             "open_circuits": circuits.get_open_circuits() if circuits else []}
 
 @app.get("/v1/heartbeat/health-history")
-async def health_history(tier: Optional[int] = None):
+async def health_history(request: Request, tier: Optional[int] = None):
+    denied = _require_admin(request)
+    if denied: return denied
     from cortexdb.heartbeat.health_checks import HealthTier
     t = None
     if tier is not None:
@@ -752,7 +775,9 @@ async def health_history(tier: Optional[int] = None):
     return {"history": health_runner.get_history(t) if health_runner else []}
 
 @app.get("/v1/ledger/recent")
-async def recent_ledger(limit: int = 20):
+async def recent_ledger(request: Request, limit: int = 20):
+    denied = _require_admin(request)
+    if denied: return denied
     limit = max(1, min(limit, 500))
     if "immutable" in db.engines:
         entries = db.engines["immutable"]._chain[-limit:]
@@ -1145,8 +1170,10 @@ async def views_stats(request: Request):
     return await data_renderer.get_view_stats() if data_renderer else []
 
 @app.get("/v1/admin/rendering/stats")
-async def rendering_stats():
+async def rendering_stats(request: Request):
     """Data rendering pipeline statistics."""
+    denied = _require_admin(request)
+    if denied: return denied
     return data_renderer.get_stats() if data_renderer else {}
 
 
@@ -1179,26 +1206,34 @@ async def compliance_audit_framework(framework: str):
             "controls": report.controls, "gaps": report.gaps}
 
 @app.get("/v1/compliance/summary")
-async def compliance_summary():
+async def compliance_summary(request: Request):
     """Get compliance framework summary."""
+    denied = _require_admin(request)
+    if denied: return denied
     return compliance.get_framework_summary() if compliance else {}
 
 @app.get("/v1/compliance/stats")
-async def compliance_stats():
+async def compliance_stats(request: Request):
     """Compliance engine statistics."""
+    denied = _require_admin(request)
+    if denied: return denied
     return compliance.get_stats() if compliance else {}
 
 
 # -- Compliance: Encryption Endpoints --
 
 @app.get("/v1/compliance/encryption/stats")
-async def encryption_stats():
+async def encryption_stats(request: Request):
     """Field encryption statistics and key health."""
+    denied = _require_admin(request)
+    if denied: return denied
     return field_encryption.get_stats() if field_encryption else {}
 
 @app.get("/v1/compliance/encryption/classification/{table}")
-async def encryption_classification(table: str):
+async def encryption_classification(request: Request, table: str):
     """Get field sensitivity classification for a table."""
+    denied = _require_admin(request)
+    if denied: return denied
     return field_encryption.get_classification(table) if field_encryption else {}
 
 @app.post("/v1/compliance/encryption/rotate-keys")
@@ -1284,20 +1319,21 @@ async def rag_hybrid_search(request: Request, body: dict):
         return JSONResponse(status_code=503, content={"error": "Database not initialized"})
     if not db.hybrid_search:
         return JSONResponse(status_code=503, content={"error": "Hybrid search not available"})
-    results = await db.hybrid_search.search(
-        query=body["query"],
-        collection=body.get("collection", "documents"),
-        limit=max(1, min(int(body.get("limit", 10)), 500)),
-        tenant_id=tid,
-        rerank=body.get("rerank", True),
-    )
-    return {"results": [{"chunk_id": r.chunk_id, "content": r.content,
-                         "score": round(r.score, 4),
-                         "dense_score": round(r.dense_score, 4),
-                         "sparse_score": round(r.sparse_score, 4),
-                         "rerank_score": round(r.rerank_score, 4) if r.rerank_score else None,
-                         "metadata": r.metadata}
-                        for r in results]}
+    with trace_span("rag_hybrid_search", attributes={"tenant_id": tid or ""}):
+        results = await db.hybrid_search.search(
+            query=body["query"],
+            collection=body.get("collection", "documents"),
+            limit=max(1, min(int(body.get("limit", 10)), 500)),
+            tenant_id=tid,
+            rerank=body.get("rerank", True),
+        )
+        return {"results": [{"chunk_id": r.chunk_id, "content": r.content,
+                             "score": round(r.score, 4),
+                             "dense_score": round(r.dense_score, 4),
+                             "sparse_score": round(r.sparse_score, 4),
+                             "rerank_score": round(r.rerank_score, 4) if r.rerank_score else None,
+                             "metadata": r.metadata}
+                            for r in results]}
 
 
 # ── Benchmark Endpoints ──
@@ -1406,11 +1442,12 @@ async def rag_ingest(request: Request, body: dict):
     if len(body["text"]) > MAX_RAG_TEXT_SIZE:
         raise HTTPException(status_code=413, detail=f"Text exceeds {MAX_RAG_TEXT_SIZE // (1024*1024)}MB limit")
     tid = _tenant_id(request)
-    result = await db.rag.ingest(
-        text=body["text"], doc_id=body["doc_id"],
-        collection=body.get("collection", "documents"),
-        metadata=body.get("metadata"), tenant_id=tid)
-    return result
+    with trace_span("rag_ingest", attributes={"tenant_id": tid or "", "doc_id": body["doc_id"]}):
+        result = await db.rag.ingest(
+            text=body["text"], doc_id=body["doc_id"],
+            collection=body.get("collection", "documents"),
+            metadata=body.get("metadata"), tenant_id=tid)
+        return result
 
 
 @app.post("/v1/rag/retrieve")
