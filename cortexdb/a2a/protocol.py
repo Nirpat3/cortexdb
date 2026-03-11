@@ -168,19 +168,39 @@ class A2AProtocol:
             logger.warning(f"PG update task failed: {e}")
 
     async def _pg_atomic_transition(self, task_id: str, from_status: str,
-                                     to_status: str) -> bool:
+                                     to_status: str, *,
+                                     assigned_agent: str = None,
+                                     output_data: Optional[Dict] = None,
+                                     error_message: str = None) -> bool:
         """Atomically transition a task's status in PG. Returns True if successful.
 
         Uses WHERE status=$2 to ensure only one concurrent caller wins.
+        Optional extra fields are set in the same UPDATE to avoid a second write.
         """
         if not self._pool:
             return True  # No PG, allow in-memory transition
         try:
+            # Build SET clause dynamically for optional extra fields
+            set_parts = ["status=$2", "updated_at=NOW()"]
+            params = [task_id, to_status, from_status]
+            idx = 4  # next param index
+
+            if assigned_agent is not None:
+                set_parts.append(f"assigned_agent=${idx}")
+                params.append(assigned_agent)
+                idx += 1
+            if output_data is not None:
+                set_parts.append(f"output_data=${idx}")
+                params.append(json.dumps(output_data, default=str))
+                idx += 1
+            if error_message is not None:
+                set_parts.append(f"error_message=${idx}")
+                params.append(error_message)
+                idx += 1
+
+            query = f"UPDATE a2a_tasks SET {', '.join(set_parts)} WHERE task_id=$1 AND status=$3"
             async with self._pool.acquire() as conn:
-                result = await conn.execute(
-                    """UPDATE a2a_tasks SET status=$2, updated_at=NOW()
-                       WHERE task_id=$1 AND status=$3""",
-                    task_id, to_status, from_status)
+                result = await conn.execute(query, *params)
                 return result == "UPDATE 1"
         except Exception as e:
             logger.warning(f"PG atomic transition failed: {e}")
@@ -303,11 +323,11 @@ class A2AProtocol:
         if task and task.status == A2ATaskStatus.CREATED:
             # Atomic PG transition to prevent double-assign
             if not await self._pg_atomic_transition(
-                    task_id, A2ATaskStatus.CREATED.value, A2ATaskStatus.ASSIGNED.value):
+                    task_id, A2ATaskStatus.CREATED.value, A2ATaskStatus.ASSIGNED.value,
+                    assigned_agent=task.target_agent_id):
                 return None
             task.status = A2ATaskStatus.ASSIGNED
             task.assigned_at = time.time()
-            await self._pg_update_task(task)  # update remaining fields
             await self._redis_set_task(task)
             return task
         return None
@@ -319,7 +339,6 @@ class A2AProtocol:
                     task_id, A2ATaskStatus.ASSIGNED.value, A2ATaskStatus.RUNNING.value):
                 return None
             task.status = A2ATaskStatus.RUNNING
-            await self._pg_update_task(task)
             await self._redis_set_task(task)
             return task
         return None
@@ -337,12 +356,12 @@ class A2AProtocol:
                 return None
             # Atomic PG transition to prevent double-complete
             if not await self._pg_atomic_transition(
-                    task_id, A2ATaskStatus.RUNNING.value, A2ATaskStatus.COMPLETED.value):
+                    task_id, A2ATaskStatus.RUNNING.value, A2ATaskStatus.COMPLETED.value,
+                    output_data=output_data):
                 return None
             task.status = A2ATaskStatus.COMPLETED
             task.output_data = output_data
             task.completed_at = time.time()
-            await self._pg_update_task(task)
             await self._redis_set_task(task)
             logger.info(f"A2A task completed: {task_id}")
             return task
@@ -360,12 +379,12 @@ class A2AProtocol:
                 return None
             # Atomic PG transition
             if not await self._pg_atomic_transition(
-                    task_id, task.status.value, A2ATaskStatus.FAILED.value):
+                    task_id, task.status.value, A2ATaskStatus.FAILED.value,
+                    error_message=error):
                 return None
             task.status = A2ATaskStatus.FAILED
             task.error = error
             task.completed_at = time.time()
-            await self._pg_update_task(task)
             await self._redis_set_task(task)
             logger.warning(f"A2A task failed: {task_id} - {error}")
             return task

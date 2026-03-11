@@ -100,6 +100,8 @@ class VectorEngine(BaseEngine):
                     collection,
                     vectors_config=VectorParams(size=VECTOR_DIM, distance=Distance.COSINE)
                 )
+                if len(self._collections_created) >= 10000:
+                    self._collections_created.clear()
                 self._collections_created.add(collection)
             except Exception as e:
                 err_str = str(e).lower()
@@ -178,6 +180,16 @@ class VectorEngine(BaseEngine):
             self._write_count += len(qdrant_points)
 
         return len(qdrant_points)
+
+    async def delete_collection(self, collection: str) -> bool:
+        """Delete a collection and remove it from the tracking set."""
+        try:
+            await self.client.delete_collection(collection)
+            self._collections_created.discard(collection)
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to delete collection '{collection}': {e}")
+            return False
 
     async def delete_vectors(self, collection: str, ids: List[str]) -> int:
         """Delete vectors by ID."""

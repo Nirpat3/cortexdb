@@ -106,7 +106,8 @@ class SleepCycleScheduler:
                 logger.error(f"  Sleep [{task.name}] FAILED: {e}")
 
         result.completed_at = time.time()
-        self._running = False
+        async with self._run_lock:
+            self._running = False
         self._last_result = result
         duration = result.completed_at - result.started_at
         logger.info(f"Sleep cycle COMPLETED: {result.tasks_run} ok, "

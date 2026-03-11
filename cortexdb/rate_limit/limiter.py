@@ -56,6 +56,8 @@ class RateLimiter:
         self.memory_engine = memory_engine
         self._counters: Dict[str, list] = {}  # key -> [count, window_start]
         self._global_limits = GLOBAL_LIMITS.copy()
+        self._check_count = 0
+        self._cleanup_interval = 100  # run cleanup every N _check_window calls
 
     async def check(self, tenant_id: Optional[str] = None,
                     agent_id: Optional[str] = None,
@@ -104,6 +106,10 @@ class RateLimiter:
     def _check_window(self, key: str, limit: int,
                       window_seconds: int, now: float) -> RateLimitResult:
         """Sliding window counter check."""
+        self._check_count += 1
+        if self._check_count % self._cleanup_interval == 0:
+            self.cleanup(now)
+
         if key not in self._counters:
             self._counters[key] = [0, now]
 
@@ -130,6 +136,21 @@ class RateLimiter:
         return RateLimitResult(
             allowed=True, limit=limit, remaining=limit - count,
             reset_at=window_start + window_seconds)
+
+    def cleanup(self, now: float = None):
+        """Evict counter entries whose window has long expired (2x window age)."""
+        now = now or time.time()
+        # Default window is 60s for most tiers, 900s for auth.
+        # Use 2x the largest standard window (900s) as a safe threshold,
+        # but check per-key: rate limit windows are 60s, auth is 900s.
+        expired_keys = [
+            key for key, (count, window_start) in self._counters.items()
+            if now - window_start >= (1800 if key.startswith("auth_fail:") else 120)
+        ]
+        for key in expired_keys:
+            del self._counters[key]
+        if expired_keys:
+            logger.debug("Rate limiter cleanup: evicted %d expired entries", len(expired_keys))
 
     async def check_redis(self, key: str, limit: int,
                           window_seconds: int = 60) -> RateLimitResult:

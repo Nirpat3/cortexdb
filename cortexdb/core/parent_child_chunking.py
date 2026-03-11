@@ -17,6 +17,8 @@ from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger("cortexdb.core.parent_child_chunking")
 
+_CJK_RE = re.compile(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]')
+
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -58,12 +60,7 @@ def _estimate_tokens(text: str) -> int:
     CJK characters (Chinese, Japanese, Korean) are typically 1 token each,
     so they are counted separately from Latin text which averages ~4 chars/token.
     """
-    cjk_count = sum(
-        1 for ch in text
-        if '\u4e00' <= ch <= '\u9fff'    # CJK Unified Ideographs
-        or '\u3040' <= ch <= '\u309f'     # Hiragana
-        or '\u30a0' <= ch <= '\u30ff'     # Katakana
-    )
+    cjk_count = len(_CJK_RE.findall(text))
     non_cjk_len = len(text) - cjk_count
     return cjk_count + non_cjk_len // 4
 

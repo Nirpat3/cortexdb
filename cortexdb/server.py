@@ -127,6 +127,7 @@ async def lifespan(app: FastAPI):
 
     # Multi-Tenancy
     tenant_mgr = TenantManager(db.engines)
+    await tenant_mgr.load_from_db()
 
     # Rate Limiting
     rate_limiter = RateLimiter(db.engines.get("memory"))

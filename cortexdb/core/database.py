@@ -92,8 +92,13 @@ class Amygdala:
     ]
 
     def __init__(self):
+        import re as _re
         self._pattern_set = set(p.upper() for p in self.INJECTION_PATTERNS)
         self._blocked_set = set(b.upper() for b in self.BLOCKED_OPERATIONS)
+        self._injection_re = _re.compile(
+            '|'.join(_re.escape(p) for p in self._pattern_set))
+        self._blocked_re = _re.compile(
+            '|'.join(_re.escape(p) for p in self._blocked_set))
         self._checks_total = 0
         self._blocks_total = 0
 
@@ -107,13 +112,11 @@ class Amygdala:
         normalized = "".join(c for c in normalized if unicodedata.category(c) != "Cf")
         query_upper = normalized.upper()
 
-        for pattern in self._pattern_set:
-            if pattern in query_upper:
-                threats.append(f"SQL_INJECTION: '{pattern}'")
+        for m in self._injection_re.finditer(query_upper):
+            threats.append(f"SQL_INJECTION: '{m.group()}'")
 
-        for blocked in self._blocked_set:
-            if blocked in query_upper:
-                threats.append(f"BLOCKED_OPERATION: '{blocked}'")
+        for m in self._blocked_re.finditer(query_upper):
+            threats.append(f"BLOCKED_OPERATION: '{m.group()}'")
 
         # Block DML on protected (immutable/audit) tables
         for table in self.PROTECTED_TABLES:
@@ -229,8 +232,9 @@ class ReadCascade:
                         threshold=r2_config.threshold, limit=1)
                     if similar:
                         data = similar[0]["payload"]["response"]
-                        await self._promote_to_r1(f"{cache_prefix}cache:{qhash}", data)
-                        await self._r0_set(r0_key, data)
+                        _serialized = json.dumps(data, default=str)
+                        await self._promote_to_r1(f"{cache_prefix}cache:{qhash}", data, serialized=_serialized)
+                        await self._r0_set(r0_key, data, serialized=_serialized)
                         self._r2_hits += 1
                         result = QueryResult(data=data, tier_served=CacheTier.R2_SEMANTIC,
                                              engines_hit=["vector_core"],
@@ -279,8 +283,9 @@ class ReadCascade:
                         self._pending_queries.pop(qhash, None)
 
                 if data is not None:
-                    await self._promote_to_r1(f"{cache_prefix}cache:{qhash}", data, ttl=3600)
-                    await self._r0_set(r0_key, data)
+                    _serialized = json.dumps(data, default=str)
+                    await self._promote_to_r1(f"{cache_prefix}cache:{qhash}", data, ttl=3600, serialized=_serialized)
+                    await self._r0_set(r0_key, data, serialized=_serialized)
                     self._r3_hits += 1
                     result = QueryResult(data=data, tier_served=CacheTier.R3_PERSISTENT,
                                          engines_hit=["relational_core"],
@@ -361,12 +366,14 @@ class ReadCascade:
             return decrypted
         return data
 
-    async def _r0_set(self, key: str, value: Any):
-        """Add to R0 cache. Acquires _r0_lock internally."""
+    async def _r0_set(self, key: str, value: Any, serialized: str = None):
+        """Add to R0 cache. Acquires _r0_lock internally.
+        If `serialized` is provided, it is used for the size check (avoids re-serializing).
+        """
         # Size guard: skip caching entries larger than 1MB
         # Perform expensive serialization and deepcopy BEFORE acquiring lock
         try:
-            entry_size = len(json.dumps(value, default=str))
+            entry_size = len(serialized) if serialized is not None else len(json.dumps(value, default=str))
             if entry_size > self._r0_max_entry_bytes:
                 return
         except (TypeError, ValueError):
@@ -393,10 +400,11 @@ class ReadCascade:
         if keys_to_evict:
             logger.debug("R0 cache: evicted %d entries for tenant %s", len(keys_to_evict), tenant_id)
 
-    async def _promote_to_r1(self, key: str, data: Any, ttl: int = 3600):
+    async def _promote_to_r1(self, key: str, data: Any, ttl: int = 3600, serialized: str = None):
         if "memory" in self.engines:
             try:
-                await self.engines["memory"].set(key, json.dumps(data, default=str), ex=ttl)
+                json_str = serialized if serialized is not None else json.dumps(data, default=str)
+                await self.engines["memory"].set(key, json_str, ex=ttl)
             except Exception as e:
                 logger.debug(f"R1 promotion failed: {e}")
 

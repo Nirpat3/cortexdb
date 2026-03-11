@@ -410,6 +410,7 @@ DECLARE
     v_entry_hash VARCHAR;
     v_entry_id UUID;
 BEGIN
+    PERFORM pg_advisory_xact_lock(hashtext('ledger_append'));
     SELECT entry_hash INTO v_prev_hash FROM immutable_ledger ORDER BY sequence_id DESC LIMIT 1;
     v_entry_hash := compute_ledger_hash(p_entry_type, p_payload, v_prev_hash);
     v_entry_id := gen_random_uuid();

@@ -302,5 +302,5 @@ class OutboxWorker:
                 """)
             if count == 0:
                 return
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(2.0)
         logger.warning(f"Outbox drain timeout after {timeout}s")
