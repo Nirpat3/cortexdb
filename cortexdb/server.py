@@ -522,14 +522,23 @@ async def set_cache_config(request: Request):
     if not collection or not isinstance(collection, str):
         raise HTTPException(400, "collection (string) is required")
     import math
-    ttl_val = int(body.get("ttl_seconds", 3600))
-    max_ent_val = int(body.get("max_entries", 10000))
-    threshold_val = float(body.get("threshold", 0.88))
+    try:
+        ttl_val = int(body.get("ttl_seconds", 3600))
+    except (ValueError, TypeError):
+        raise HTTPException(400, "ttl_seconds must be a valid integer")
+    try:
+        max_ent_val = int(body.get("max_entries", 10000))
+    except (ValueError, TypeError):
+        raise HTTPException(400, "max_entries must be a valid integer")
+    try:
+        threshold_val = float(body.get("threshold", 0.88))
+    except (ValueError, TypeError):
+        raise HTTPException(400, "threshold must be a valid number")
     if not math.isfinite(threshold_val) or threshold_val < 0:
         raise HTTPException(400, "threshold must be a finite non-negative number")
-    if not math.isfinite(ttl_val) or ttl_val < 0:
+    if ttl_val < 0:
         ttl_val = 3600
-    if not math.isfinite(max_ent_val) or max_ent_val < 0:
+    if max_ent_val < 0:
         max_ent_val = 10000
     config = CollectionCacheConfig(
         threshold=threshold_val,
@@ -952,14 +961,18 @@ async def sharding_init(request: Request):
     """Initialize Citus extension and sharding configuration."""
     denied = _require_admin(request)
     if denied: return denied
-    return await shard_mgr.initialize() if shard_mgr else {"error": "not available"}
+    if not shard_mgr:
+        raise HTTPException(503, "Sharding not available")
+    return await shard_mgr.initialize()
 
 @app.post("/v1/admin/sharding/distribute")
 async def sharding_distribute(request: Request):
     """Distribute all tables across Citus workers."""
     denied = _require_admin(request)
     if denied: return denied
-    return await shard_mgr.distribute_tables() if shard_mgr else {"error": "not available"}
+    if not shard_mgr:
+        raise HTTPException(503, "Sharding not available")
+    return await shard_mgr.distribute_tables()
 
 @app.post("/v1/admin/sharding/add-worker")
 async def sharding_add_worker(request: Request, host: str, port: int = 5432):
@@ -971,7 +984,9 @@ async def sharding_add_worker(request: Request, host: str, port: int = 5432):
         raise HTTPException(400, "Invalid hostname format")
     if not (1 <= port <= 65535):
         raise HTTPException(400, "Port must be 1-65535")
-    return await shard_mgr.add_worker(host, port) if shard_mgr else {"error": "not available"}
+    if not shard_mgr:
+        raise HTTPException(503, "Sharding not available")
+    return await shard_mgr.add_worker(host, port)
 
 @app.post("/v1/admin/sharding/remove-worker")
 async def sharding_remove_worker(request: Request, host: str, port: int = 5432):
@@ -983,7 +998,9 @@ async def sharding_remove_worker(request: Request, host: str, port: int = 5432):
         raise HTTPException(400, "Invalid hostname format")
     if not (1 <= port <= 65535):
         raise HTTPException(400, "Port must be 1-65535")
-    return await shard_mgr.remove_worker(host, port) if shard_mgr else {"error": "not available"}
+    if not shard_mgr:
+        raise HTTPException(503, "Sharding not available")
+    return await shard_mgr.remove_worker(host, port)
 
 @app.post("/v1/admin/sharding/rebalance")
 async def sharding_rebalance(request: Request):
@@ -991,7 +1008,7 @@ async def sharding_rebalance(request: Request):
     denied = _require_admin(request)
     if denied: return denied
     if not shard_mgr:
-        return {"error": "not available"}
+        raise HTTPException(503, "Sharding not available")
     result = await shard_mgr.rebalance()
     return {"moved": result.moved, "errors": result.errors,
             "duration_ms": result.duration_ms}
@@ -1077,7 +1094,7 @@ async def index_create(request: Request, concurrently: bool = True):
     denied = _require_admin(request)
     if denied: return denied
     if not ai_index:
-        return {"error": "not available"}
+        raise HTTPException(503, "AI index not available")
     await ai_index.recommend()  # Ensure recommendations are fresh
     return await ai_index.create_optimal(concurrently=concurrently)
 
@@ -1138,7 +1155,7 @@ async def rendering_stats():
 async def compliance_audit_all():
     """Run compliance audit across all frameworks."""
     if not compliance:
-        return {"error": "not available"}
+        raise HTTPException(503, "Compliance not available")
     report = await compliance.audit()
     return {"score": report.score, "total": report.total_controls,
             "compliant": report.compliant, "partial": report.partial,
@@ -1149,7 +1166,7 @@ async def compliance_audit_all():
 async def compliance_audit_framework(framework: str):
     """Run compliance audit for a specific framework."""
     if not compliance:
-        return {"error": "not available"}
+        raise HTTPException(503, "Compliance not available")
     try:
         fw = Framework(framework)
     except ValueError:
@@ -1189,7 +1206,7 @@ async def encryption_rotate(request: Request):
     denied = _require_admin(request)
     if denied: return denied
     if not field_encryption:
-        return {"error": "not available"}
+        raise HTTPException(503, "Field encryption not available")
     due = field_encryption.key_manager.check_rotation_needed()
     rotated = []
     for key_id in due:
@@ -1244,7 +1261,7 @@ async def audit_log(request: Request,
 async def compliance_evidence(framework: str):
     """Generate compliance evidence report for auditors."""
     if not compliance_audit:
-        return {"error": "not available"}
+        raise HTTPException(503, "Compliance audit not available")
     return await compliance_audit.generate_evidence_report(framework)
 
 @app.get("/v1/compliance/audit-log/stats")

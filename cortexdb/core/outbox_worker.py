@@ -138,8 +138,8 @@ class OutboxWorker:
 
     async def _process_batch(self):
         """Claim a batch of pending/retryable entries and dispatch them."""
+        # Claim entries atomically, then release the connection
         async with self.pool.acquire() as conn:
-            # Claim entries atomically with FOR UPDATE SKIP LOCKED
             rows = await conn.fetch("""
                 UPDATE write_outbox
                 SET status = 'processing'
@@ -155,7 +155,11 @@ class OutboxWorker:
                 RETURNING *
             """, self.BATCH_SIZE)
 
-            for row in rows:
+        # Process dispatches individually, acquiring a new connection only for
+        # the status update after each dispatch (avoids holding a connection
+        # during slow engine.write() calls).
+        for row in rows:
+            async with self.pool.acquire() as conn:
                 await self._dispatch(conn, row)
 
     async def _dispatch(self, conn: Any, row: Any):

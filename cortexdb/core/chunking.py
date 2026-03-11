@@ -196,7 +196,13 @@ class ChunkingPipeline:
                     start_char = text.find(current_sentences[0], _search_pos)
                     if start_char == -1:
                         start_char = _search_pos
-                    end_char = start_char + len(content)
+                    # Find end_char by locating the last sentence in the original text
+                    last_sent = current_sentences[-1]
+                    last_sent_pos = text.find(last_sent, start_char)
+                    if last_sent_pos != -1:
+                        end_char = last_sent_pos + len(last_sent)
+                    else:
+                        end_char = start_char + len(content)
                     if end_char > len(text):
                         end_char = len(text)
                     _search_pos = start_char + 1

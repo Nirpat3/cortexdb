@@ -454,10 +454,9 @@ class HierarchicalChunker:
             if token_count >= self.min_child_size or not segments:
                 segments.append((pos, end, content))
 
-            pos += step
-
-            # Guard against infinite loop if step somehow ended up as 0.
-            if step == 0:  # pragma: no cover
-                break
+            # Advance based on actual end position minus overlap, not fixed step
+            new_pos = end - overlap_chars
+            # Ensure pos always advances by at least 1 to avoid infinite loops
+            pos = max(pos + 1, new_pos)
 
         return segments

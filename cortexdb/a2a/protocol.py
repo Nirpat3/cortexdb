@@ -10,6 +10,7 @@ import json
 import time
 import uuid
 import logging
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -107,7 +108,7 @@ class A2AProtocol:
         self.engines = engines or {}
         self._redis = redis   # aioredis client (or None for standalone mode)
         self._pool = pool     # asyncpg pool (or None for standalone mode)
-        self._tasks: Dict[str, A2ATask] = {}
+        self._tasks: OrderedDict[str, A2ATask] = OrderedDict()
         self._MAX_CACHED_TASKS = 5000  # bounded in-memory task cache
 
     # ------------------------------------------------------------------
@@ -115,11 +116,11 @@ class A2AProtocol:
     # ------------------------------------------------------------------
 
     def _cache_task(self, task: A2ATask):
-        """Add task to in-memory cache, evicting oldest if over limit."""
+        """Add task to in-memory cache, evicting LRU entry if over limit."""
+        if task.task_id in self._tasks:
+            self._tasks.move_to_end(task.task_id)
         if len(self._tasks) >= self._MAX_CACHED_TASKS:
-            # Evict the oldest task by created_at
-            oldest_id = min(self._tasks, key=lambda k: self._tasks[k].created_at)
-            del self._tasks[oldest_id]
+            self._tasks.popitem(last=False)  # evict oldest (LRU)
         self._tasks[task.task_id] = task
 
     async def _pg_insert_task(self, task: A2ATask):
@@ -242,6 +243,7 @@ class A2AProtocol:
         """Load task: in-memory -> Redis -> PG."""
         task = self._tasks.get(task_id)
         if task:
+            self._tasks.move_to_end(task_id)
             return task
         task = await self._redis_get_task(task_id)
         if task:

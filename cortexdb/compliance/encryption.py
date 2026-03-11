@@ -320,22 +320,6 @@ class FieldEncryption:
         plaintext = aesgcm.decrypt(iv, ciphertext + tag, None)
         return plaintext.decode("utf-8")
 
-    def _encrypt_fallback(self, plaintext: str, key: bytes,
-                           key_meta: EncryptionKey) -> EncryptedField:
-        """XOR-based fallback (DEVELOPMENT ONLY, NOT SECURE)."""
-        iv = secrets.token_bytes(12)
-        data = plaintext.encode("utf-8")
-        # Extend key to data length
-        extended_key = (key * ((len(data) // len(key)) + 1))[:len(data)]
-        ct = bytes(a ^ b for a, b in zip(data, extended_key))
-
-        return EncryptedField(
-            ciphertext=base64.b64encode(ct).decode(),
-            key_id=key_meta.key_id,
-            key_version=key_meta.version,
-            iv=base64.b64encode(iv).decode(),
-            algorithm="XOR-FALLBACK")
-
     def _decrypt_fallback(self, encrypted: EncryptedField, key: bytes) -> str:
         """XOR-based fallback decryption."""
         ct = base64.b64decode(encrypted.ciphertext)
