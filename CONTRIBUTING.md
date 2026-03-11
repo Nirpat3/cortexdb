@@ -84,11 +84,7 @@ cortexdb/
 │       └── sleep_cycle.py        # Background maintenance cycles
 ├── cortexdb/mcp/
 │   └── agent_memory.py    # Agent memory protocol (store/recall/forget/share)
-├── init-scripts/          # SQL schema files
-│   ├── outbox_schema.sql          # Transactional outbox table
-│   ├── embedding_sync_triggers.sql # Embedding sync triggers
-│   ├── agent_memory_schema.sql    # Agent memory tables
-│   └── a2a_tasks_schema.sql       # Externalized A2A task storage
+├── db/migrations/         # SQL schema migrations (up + down files)
 ├── docs/                  # Documentation
 │   └── PHD-EVALUATION.md  # PhD expert evaluation of architecture
 └── tests/                 # Test suite

@@ -120,8 +120,6 @@ services:
       - POSTGRES_WAL_LEVEL=logical
     volumes:
       - cortex-pg-data:/var/lib/postgresql/data
-      - ./db/migrations/001_schema.sql:/docker-entrypoint-initdb.d/01-init.sql
-      - ./db/migrations/002_sharding.sql:/docker-entrypoint-initdb.d/02-sharding.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U cortex -d cortexdb"]
       interval: 5s

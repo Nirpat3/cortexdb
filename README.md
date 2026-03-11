@@ -275,7 +275,7 @@ cortexdb/
 │   ├── a2a/                   # Agent-to-agent protocol
 │   └── server.py              # FastAPI service
 ├── dashboard/                 # Next.js admin dashboard
-├── init-scripts/              # PostgreSQL schema
+├── db/migrations/             # PostgreSQL schema migrations
 ├── docker-compose.yml         # Full stack
 └── docs/
 ```

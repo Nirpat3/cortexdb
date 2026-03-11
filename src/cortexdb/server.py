@@ -206,21 +206,6 @@ async def lifespan(app: FastAPI):
     _migrator = Migrator(db.engines.get("relational").pool, auto_migrate=auto_migrate)
     await _migrator.run()
 
-    # Post-migration compatibility check
-    if not await _migrator.check_compatibility():
-        current = await _migrator.get_current_version()
-        latest = await _migrator.get_latest_version()
-        logger.error(
-            "Database schema (version %d) is behind migration files (version %d). "
-            "Run `python -m cortexdb.migrate up` to apply pending migrations.",
-            current, latest,
-        )
-        if not auto_migrate:
-            raise SystemExit(
-                f"Database schema is behind (v{current} < v{latest}). "
-                f"Run `python -m cortexdb.migrate up` to apply pending migrations."
-            )
-
     # Grid
     grid_sm = NodeStateMachine()
     repair_eng = RepairEngine(grid_sm)
@@ -3217,7 +3202,7 @@ async def unified_health(request: Request):
 
 # ── SuperAdmin: Schema Migrations ──────────────────
 
-@app.get("/v1/superadmin/migrations")
+@app.get("/v1/superadmin/admin-migrations")
 async def get_migrations(request: Request):
     _verify_superadmin(request)
     from cortexdb.superadmin.migrations import MigrationRunner, MIGRATIONS
@@ -3229,7 +3214,7 @@ async def get_migrations(request: Request):
         "total_available": len(MIGRATIONS),
     }
 
-@app.post("/v1/superadmin/migrations/run")
+@app.post("/v1/superadmin/admin-migrations/run")
 async def run_migrations(request: Request):
     _verify_superadmin(request)
     from cortexdb.superadmin.migrations import MigrationRunner

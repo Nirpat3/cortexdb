@@ -6,8 +6,10 @@ Usage:
     python -m cortexdb.migrate up                      # apply all pending
     python -m cortexdb.migrate up --to 007             # apply up to version 7
     python -m cortexdb.migrate down --to 005           # rollback to version 5
+    python -m cortexdb.migrate baseline --version 5    # mark 1-5 as applied without running
     python -m cortexdb.migrate --dry-run up            # show what would be applied
     python -m cortexdb.migrate --dry-run down --to 005 # show what would roll back
+    python -m cortexdb.migrate --force up              # continue despite checksum mismatches
 """
 
 import argparse
@@ -75,12 +77,13 @@ async def cmd_status(database_url: str, **_kwargs):
         await pool.close()
 
 
-async def cmd_up(database_url: str, dry_run: bool = False, to_version: int = None, **_kwargs):
+async def cmd_up(database_url: str, dry_run: bool = False, to_version: int = None,
+                 force: bool = False, **_kwargs):
     """Apply pending migrations."""
     pool = await _create_pool(database_url)
     try:
         from cortexdb.core.migrator import Migrator
-        migrator = Migrator(pool)
+        migrator = Migrator(pool, force=force)
 
         if dry_run:
             pending = await migrator.dry_run()
@@ -97,59 +100,27 @@ async def cmd_up(database_url: str, dry_run: bool = False, to_version: int = Non
                 print(f"  {_color(ver, CYAN)}  {m['name']}")
             print()
         else:
-            if to_version is not None:
-                # Apply up to a specific version: run() applies all, so we use
-                # a filtered approach by temporarily limiting scan results.
-                # For simplicity, apply one-by-one up to target.
-                pending = await migrator.dry_run()
-                pending = [m for m in pending if m["version"] <= to_version]
-                if not pending:
-                    print(_color("Database is up to date (no pending migrations up to version %d)." % to_version, GREEN))
-                    return
-                # Apply by running full migrator — it applies all pending.
-                # To limit, we do manual application.
-                async with pool.acquire() as conn:
-                    await conn.execute("SELECT pg_advisory_lock(42)")
-                    try:
-                        from cortexdb.core.migrator import MIGRATIONS_DIR, MIGRATION_PATTERN
-                        for m in pending:
-                            ver = m["version"]
-                            name = m["name"]
-                            filepath = MIGRATIONS_DIR / m["filepath"].split("/")[-1].split("\\")[-1]
-                            # Reconstruct from scan
-                            pass
+            label = f"up to version {to_version:03d}" if to_version else "all pending"
+            print(_color(f"\nApplying {label} migrations...\n", BOLD))
+            await migrator.run(up_to_version=to_version)
+            print(_color("Done.", GREEN))
+    finally:
+        await pool.close()
 
-                        # Simpler: just use the migrator internals
-                        await migrator._ensure_schema_migrations_table(conn)
-                        applied = await migrator._get_applied_migrations(conn)
-                        applied_versions = {am["version"] for am in applied}
-                        all_files = migrator._scan_migration_files()
-                        count = 0
-                        for version, name, filepath in all_files:
-                            if version in applied_versions:
-                                continue
-                            if version > to_version:
-                                break
-                            sql = filepath.read_text(encoding="utf-8")
-                            checksum = migrator._file_checksum(filepath)
-                            print(f"  Applying {_color(f'{version:03d}', CYAN)}_{name} ... ", end="", flush=True)
-                            await conn.execute(sql)
-                            await conn.execute(
-                                "INSERT INTO schema_migrations (version, name, checksum) VALUES ($1, $2, $3)",
-                                version, name, checksum,
-                            )
-                            print(_color("OK", GREEN))
-                            count += 1
-                        if count == 0:
-                            print(_color("No pending migrations up to version %d." % to_version, GREEN))
-                        else:
-                            print(_color(f"\nApplied {count} migration(s).", GREEN))
-                    finally:
-                        await conn.execute("SELECT pg_advisory_unlock(42)")
-            else:
-                print(_color("\nApplying all pending migrations...\n", BOLD))
-                await migrator.run()
-                print(_color("Done.", GREEN))
+
+async def cmd_baseline(database_url: str, to_version: int = None, **_kwargs):
+    """Mark migrations as applied without executing them."""
+    if to_version is None:
+        print(_color("Error: --version VERSION is required for baseline.", RED))
+        sys.exit(1)
+
+    pool = await _create_pool(database_url)
+    try:
+        from cortexdb.core.migrator import Migrator
+        migrator = Migrator(pool)
+        print(_color(f"\nBaselining migrations up to version {to_version:03d}...\n", BOLD))
+        await migrator.baseline(to_version)
+        print(_color("Done.", GREEN))
     finally:
         await pool.close()
 
@@ -204,6 +175,11 @@ def main():
         action="store_true",
         help="Show what would be done without making changes",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Continue on checksum mismatches instead of failing",
+    )
 
     subparsers = parser.add_subparsers(dest="command", help="Migration command")
 
@@ -217,6 +193,11 @@ def main():
     # down
     down_parser = subparsers.add_parser("down", help="Rollback migrations")
     down_parser.add_argument("--to", type=int, dest="to_version", help="Roll back to this version number")
+
+    # baseline
+    baseline_parser = subparsers.add_parser("baseline", help="Mark migrations as applied without executing")
+    baseline_parser.add_argument("--version", type=int, dest="to_version", required=True,
+                                 help="Baseline up to this version number")
 
     args = parser.parse_args()
 
@@ -232,11 +213,13 @@ def main():
         "status": cmd_status,
         "up": cmd_up,
         "down": cmd_down,
+        "baseline": cmd_baseline,
     }
 
     coro = commands[args.command](
         database_url=args.database_url,
         dry_run=args.dry_run,
+        force=args.force,
         to_version=getattr(args, "to_version", None),
     )
     asyncio.run(coro)

@@ -28,8 +28,8 @@ CREATE TABLE IF NOT EXISTS tenants (
     deactivated_at TIMESTAMPTZ
 );
 
-CREATE INDEX idx_tenants_status ON tenants(status);
-CREATE INDEX idx_tenants_api_key ON tenants(api_key_hash);
+CREATE INDEX IF NOT EXISTS idx_tenants_status ON tenants(status);
+CREATE INDEX IF NOT EXISTS idx_tenants_api_key ON tenants(api_key_hash);
 
 -- ================================================
 -- A2A: Agent-to-Agent Protocol (DOC-017/018 G19)
@@ -52,8 +52,8 @@ CREATE TABLE IF NOT EXISTS a2a_agent_cards (
     last_heartbeat TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_a2a_tenant ON a2a_agent_cards(tenant_id);
-CREATE INDEX idx_a2a_skills ON a2a_agent_cards USING GIN(skills);
+CREATE INDEX IF NOT EXISTS idx_a2a_tenant ON a2a_agent_cards(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_a2a_skills ON a2a_agent_cards USING GIN(skills);
 
 CREATE TABLE IF NOT EXISTS a2a_tasks (
     task_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -71,9 +71,9 @@ CREATE TABLE IF NOT EXISTS a2a_tasks (
     error TEXT
 );
 
-CREATE INDEX idx_a2a_tasks_status ON a2a_tasks(status);
-CREATE INDEX idx_a2a_tasks_target ON a2a_tasks(target_agent_id);
-CREATE INDEX idx_a2a_tasks_tenant ON a2a_tasks(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_a2a_tasks_status ON a2a_tasks(status);
+CREATE INDEX IF NOT EXISTS idx_a2a_tasks_target ON a2a_tasks(target_agent_id);
+CREATE INDEX IF NOT EXISTS idx_a2a_tasks_tenant ON a2a_tasks(tenant_id);
 
 -- ================================================
 -- RELATIONALCORE: Business data tables
@@ -103,9 +103,9 @@ CREATE TABLE IF NOT EXISTS blocks (
     UNIQUE(name, version)
 );
 
-CREATE INDEX idx_blocks_type ON blocks(block_type);
-CREATE INDEX idx_blocks_tags ON blocks USING GIN(tags);
-CREATE INDEX idx_blocks_name_search ON blocks USING GIN(name gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_blocks_type ON blocks(block_type);
+CREATE INDEX IF NOT EXISTS idx_blocks_tags ON blocks USING GIN(tags);
+CREATE INDEX IF NOT EXISTS idx_blocks_name_search ON blocks USING GIN(name gin_trgm_ops);
 
 CREATE TABLE IF NOT EXISTS agents (
     agent_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -125,9 +125,9 @@ CREATE TABLE IF NOT EXISTS agents (
     score DOUBLE PRECISION
 );
 
-CREATE INDEX idx_agents_state ON agents(state);
-CREATE INDEX idx_agents_parent ON agents(parent_id);
-CREATE INDEX idx_agents_grid ON agents(grid_address);
+CREATE INDEX IF NOT EXISTS idx_agents_state ON agents(state);
+CREATE INDEX IF NOT EXISTS idx_agents_parent ON agents(parent_id);
+CREATE INDEX IF NOT EXISTS idx_agents_grid ON agents(grid_address);
 
 CREATE TABLE IF NOT EXISTS tasks (
     task_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -149,8 +149,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     completed_at TIMESTAMPTZ
 );
 
-CREATE INDEX idx_tasks_status ON tasks(status);
-CREATE INDEX idx_tasks_agent ON tasks(agent_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+CREATE INDEX IF NOT EXISTS idx_tasks_agent ON tasks(agent_id);
 
 CREATE TABLE IF NOT EXISTS experience_ledger (
     experience_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -169,8 +169,8 @@ CREATE TABLE IF NOT EXISTS experience_ledger (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_experience_context ON experience_ledger(context_hash);
-CREATE INDEX idx_experience_task_type ON experience_ledger(task_type);
+CREATE INDEX IF NOT EXISTS idx_experience_context ON experience_ledger(context_hash);
+CREATE INDEX IF NOT EXISTS idx_experience_task_type ON experience_ledger(task_type);
 
 CREATE TABLE IF NOT EXISTS grid_nodes (
     node_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -192,9 +192,9 @@ CREATE TABLE IF NOT EXISTS grid_nodes (
     tombstone JSONB
 );
 
-CREATE INDEX idx_grid_state ON grid_nodes(state);
-CREATE INDEX idx_grid_type ON grid_nodes(node_type);
-CREATE INDEX idx_grid_zone ON grid_nodes(zone);
+CREATE INDEX IF NOT EXISTS idx_grid_state ON grid_nodes(state);
+CREATE INDEX IF NOT EXISTS idx_grid_type ON grid_nodes(node_type);
+CREATE INDEX IF NOT EXISTS idx_grid_zone ON grid_nodes(zone);
 
 CREATE TABLE IF NOT EXISTS grid_links (
     link_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -210,8 +210,8 @@ CREATE TABLE IF NOT EXISTS grid_links (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_links_source ON grid_links(source_node_id);
-CREATE INDEX idx_links_target ON grid_links(target_node_id);
+CREATE INDEX IF NOT EXISTS idx_links_source ON grid_links(source_node_id);
+CREATE INDEX IF NOT EXISTS idx_links_target ON grid_links(target_node_id);
 
 CREATE TABLE IF NOT EXISTS asa_standards (
     standard_id VARCHAR(30) PRIMARY KEY,
@@ -239,8 +239,8 @@ CREATE TABLE IF NOT EXISTS query_paths (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_paths_strength ON query_paths(strength DESC);
-CREATE INDEX idx_paths_pattern ON query_paths(query_pattern_hash);
+CREATE INDEX IF NOT EXISTS idx_paths_strength ON query_paths(strength DESC);
+CREATE INDEX IF NOT EXISTS idx_paths_pattern ON query_paths(query_pattern_hash);
 
 CREATE TABLE IF NOT EXISTS response_cache_meta (
     cache_key VARCHAR(128) PRIMARY KEY,
@@ -273,7 +273,7 @@ CREATE TABLE IF NOT EXISTS heartbeats (
 );
 
 SELECT create_hypertable('heartbeats', 'time', if_not_exists => TRUE);
-CREATE INDEX idx_heartbeats_node ON heartbeats(node_id, time DESC);
+CREATE INDEX IF NOT EXISTS idx_heartbeats_node ON heartbeats(node_id, time DESC);
 
 CREATE TABLE IF NOT EXISTS agent_metrics (
     time TIMESTAMPTZ NOT NULL,
@@ -344,9 +344,9 @@ CREATE TRIGGER immutable_ledger_no_update
     BEFORE UPDATE OR DELETE ON immutable_ledger
     FOR EACH ROW EXECUTE FUNCTION prevent_ledger_modification();
 
-CREATE INDEX idx_ledger_type ON immutable_ledger(entry_type);
-CREATE INDEX idx_ledger_related ON immutable_ledger(related_id);
-CREATE INDEX idx_ledger_time ON immutable_ledger(created_at);
+CREATE INDEX IF NOT EXISTS idx_ledger_type ON immutable_ledger(entry_type);
+CREATE INDEX IF NOT EXISTS idx_ledger_related ON immutable_ledger(related_id);
+CREATE INDEX IF NOT EXISTS idx_ledger_time ON immutable_ledger(created_at);
 
 -- ================================================
 -- SEED DATA: ASA Standards (21 total)
@@ -433,11 +433,15 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Genesis entry
-SELECT append_to_ledger(
-    'SYSTEM_GENESIS',
-    ('{"message": "CortexDB initialized", "version": "2.0.0", "timestamp": "' || NOW()::TEXT || '"}')::JSONB,
-    'cortexdb_init'
-);
+DO $$ BEGIN
+IF NOT EXISTS (SELECT 1 FROM immutable_ledger WHERE entry_type = 'SYSTEM_GENESIS') THEN
+    PERFORM append_to_ledger(
+        'SYSTEM_GENESIS',
+        ('{"message": "CortexDB initialized", "version": "2.0.0", "timestamp": "' || NOW()::TEXT || '"}')::JSONB,
+        'cortexdb_init'
+    );
+END IF;
+END $$;
 
 -- ================================================
 -- MULTI-TENANCY: Add tenant_id + Row-Level Security (DOC-019 Section 6.1)
@@ -462,17 +466,33 @@ ALTER TABLE experience_ledger ENABLE ROW LEVEL SECURITY;
 
 -- RLS Policies: filter by current_setting('app.current_tenant')
 -- Bypass for superuser (cortex role)
-CREATE POLICY blocks_tenant_isolation ON blocks
-    USING (tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant', true));
+DO $$ BEGIN
+IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'blocks_tenant_isolation') THEN
+    CREATE POLICY blocks_tenant_isolation ON blocks
+        USING (tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant', true));
+END IF;
+END $$;
 
-CREATE POLICY agents_tenant_isolation ON agents
-    USING (tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant', true));
+DO $$ BEGIN
+IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'agents_tenant_isolation') THEN
+    CREATE POLICY agents_tenant_isolation ON agents
+        USING (tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant', true));
+END IF;
+END $$;
 
-CREATE POLICY tasks_tenant_isolation ON tasks
-    USING (tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant', true));
+DO $$ BEGIN
+IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'tasks_tenant_isolation') THEN
+    CREATE POLICY tasks_tenant_isolation ON tasks
+        USING (tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant', true));
+END IF;
+END $$;
 
-CREATE POLICY experience_tenant_isolation ON experience_ledger
-    USING (tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant', true));
+DO $$ BEGIN
+IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'experience_tenant_isolation') THEN
+    CREATE POLICY experience_tenant_isolation ON experience_ledger
+        USING (tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant', true));
+END IF;
+END $$;
 
 -- Rate limiting tracking table
 CREATE TABLE IF NOT EXISTS rate_limit_log (
@@ -485,7 +505,7 @@ CREATE TABLE IF NOT EXISTS rate_limit_log (
     exceeded BOOLEAN DEFAULT FALSE
 );
 
-CREATE INDEX idx_rate_limit_tenant ON rate_limit_log(tenant_id, window_start);
+CREATE INDEX IF NOT EXISTS idx_rate_limit_tenant ON rate_limit_log(tenant_id, window_start);
 
 -- ================================================
 -- SEED: Additional ASA Standards for multi-tenancy
@@ -522,10 +542,10 @@ CREATE TABLE IF NOT EXISTS customers (
     metadata JSONB DEFAULT '{}'
 );
 
-CREATE INDEX idx_customers_email ON customers(canonical_email);
-CREATE INDEX idx_customers_phone ON customers(canonical_phone);
-CREATE INDEX idx_customers_tenant ON customers(tenant_id);
-CREATE INDEX idx_customers_status ON customers(status);
+CREATE INDEX IF NOT EXISTS idx_customers_email ON customers(canonical_email);
+CREATE INDEX IF NOT EXISTS idx_customers_phone ON customers(canonical_phone);
+CREATE INDEX IF NOT EXISTS idx_customers_tenant ON customers(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_customers_status ON customers(status);
 
 -- Customer identifiers (multi-identifier resolution)
 CREATE TABLE IF NOT EXISTS customer_identifiers (
@@ -544,9 +564,9 @@ CREATE TABLE IF NOT EXISTS customer_identifiers (
     UNIQUE(identifier_type, identifier_value, tenant_id)
 );
 
-CREATE INDEX idx_ci_customer ON customer_identifiers(customer_id);
-CREATE INDEX idx_ci_lookup ON customer_identifiers(identifier_type, identifier_value);
-CREATE INDEX idx_ci_tenant ON customer_identifiers(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_ci_customer ON customer_identifiers(customer_id);
+CREATE INDEX IF NOT EXISTS idx_ci_lookup ON customer_identifiers(identifier_type, identifier_value);
+CREATE INDEX IF NOT EXISTS idx_ci_tenant ON customer_identifiers(tenant_id);
 
 -- Customer events (TimescaleDB hypertable)
 CREATE TABLE IF NOT EXISTS customer_events (
@@ -563,10 +583,10 @@ CREATE TABLE IF NOT EXISTS customer_events (
 );
 
 SELECT create_hypertable('customer_events', 'time', if_not_exists => TRUE);
-CREATE INDEX idx_ce_customer ON customer_events(customer_id, time DESC);
-CREATE INDEX idx_ce_type ON customer_events(event_type, time DESC);
-CREATE INDEX idx_ce_tenant ON customer_events(tenant_id, time DESC);
-CREATE INDEX idx_ce_session ON customer_events(session_id);
+CREATE INDEX IF NOT EXISTS idx_ce_customer ON customer_events(customer_id, time DESC);
+CREATE INDEX IF NOT EXISTS idx_ce_type ON customer_events(event_type, time DESC);
+CREATE INDEX IF NOT EXISTS idx_ce_tenant ON customer_events(tenant_id, time DESC);
+CREATE INDEX IF NOT EXISTS idx_ce_session ON customer_events(session_id);
 
 -- Customer merge history (audit trail in ImmutableCore)
 CREATE TABLE IF NOT EXISTS customer_merges (
@@ -580,8 +600,8 @@ CREATE TABLE IF NOT EXISTS customer_merges (
     tenant_id VARCHAR(100) REFERENCES tenants(tenant_id)
 );
 
-CREATE INDEX idx_merges_canonical ON customer_merges(canonical_id);
-CREATE INDEX idx_merges_merged ON customer_merges(merged_id);
+CREATE INDEX IF NOT EXISTS idx_merges_canonical ON customer_merges(canonical_id);
+CREATE INDEX IF NOT EXISTS idx_merges_merged ON customer_merges(merged_id);
 
 -- Customer profiles (materialized from events)
 CREATE TABLE IF NOT EXISTS customer_profiles (
@@ -602,10 +622,10 @@ CREATE TABLE IF NOT EXISTS customer_profiles (
     computed_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_cp_segment ON customer_profiles(rfm_segment);
-CREATE INDEX idx_cp_churn ON customer_profiles(churn_probability DESC);
-CREATE INDEX idx_cp_health ON customer_profiles(health_score);
-CREATE INDEX idx_cp_tenant ON customer_profiles(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_cp_segment ON customer_profiles(rfm_segment);
+CREATE INDEX IF NOT EXISTS idx_cp_churn ON customer_profiles(churn_probability DESC);
+CREATE INDEX IF NOT EXISTS idx_cp_health ON customer_profiles(health_score);
+CREATE INDEX IF NOT EXISTS idx_cp_tenant ON customer_profiles(tenant_id);
 
 -- Continuous aggregate for event counts per customer
 CREATE MATERIALIZED VIEW IF NOT EXISTS customer_event_counts_daily
@@ -626,14 +646,26 @@ ALTER TABLE customers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE customer_identifiers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE customer_profiles ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY customers_tenant_isolation ON customers
-    USING (tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant', true));
+DO $$ BEGIN
+IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'customers_tenant_isolation') THEN
+    CREATE POLICY customers_tenant_isolation ON customers
+        USING (tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant', true));
+END IF;
+END $$;
 
-CREATE POLICY ci_tenant_isolation ON customer_identifiers
-    USING (tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant', true));
+DO $$ BEGIN
+IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'ci_tenant_isolation') THEN
+    CREATE POLICY ci_tenant_isolation ON customer_identifiers
+        USING (tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant', true));
+END IF;
+END $$;
 
-CREATE POLICY cp_tenant_isolation ON customer_profiles
-    USING (tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant', true));
+DO $$ BEGIN
+IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'cp_tenant_isolation') THEN
+    CREATE POLICY cp_tenant_isolation ON customer_profiles
+        USING (tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant', true));
+END IF;
+END $$;
 
 -- GraphCore: Apache AGE graph for relationship traversal (DOC-020 Section 3.3)
 -- Requires AGE extension; gracefully skip if not available

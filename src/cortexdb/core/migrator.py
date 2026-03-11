@@ -6,6 +6,7 @@ CortexDB Auto-Migration System
 - Safe for concurrent startup (advisory lock)
 """
 
+import asyncio
 import hashlib
 import logging
 import os
@@ -23,6 +24,13 @@ MIGRATIONS_DIR = _PROJECT_ROOT / "db" / "migrations"
 # Advisory lock ID — arbitrary but fixed for all CortexDB instances
 ADVISORY_LOCK_ID = 42
 
+# Timeout (seconds) for acquiring the advisory lock before giving up
+LOCK_TIMEOUT = 30
+
+# Marker comment that disables transaction wrapping for a migration file
+# (e.g. migrations containing CREATE INDEX CONCURRENTLY)
+NO_TRANSACTION_MARKER = "-- no-transaction"
+
 # Pattern: NNN_name.sql where NNN is a zero-padded integer
 MIGRATION_PATTERN = re.compile(r"^(\d+)_(.+)\.sql$")
 
@@ -33,17 +41,23 @@ ROLLBACK_PATTERN = re.compile(r"^(\d+)_(.+)\.down\.sql$")
 class Migrator:
     """Database migration engine with advisory locking, rollback, and dry-run support."""
 
-    def __init__(self, pool, auto_migrate: bool = True):
+    def __init__(self, pool, auto_migrate: bool = True, force: bool = False):
         """
         Args:
             pool: asyncpg connection pool
             auto_migrate: When False, run() only checks compatibility but does not apply.
+            force: When True, checksum mismatches produce warnings instead of errors.
         """
         self.pool = pool
         self.auto_migrate = auto_migrate
+        self.force = force
 
-    async def run(self) -> None:
-        """Main entry point — apply all pending migrations (or check-only if auto_migrate=False)."""
+    async def run(self, up_to_version: int = None) -> None:
+        """Main entry point — apply pending migrations (or check-only if auto_migrate=False).
+
+        Args:
+            up_to_version: When set, only apply migrations up to and including this version.
+        """
         if not self.auto_migrate:
             compatible = await self.check_compatibility()
             if not compatible:
@@ -57,9 +71,9 @@ class Migrator:
             return
 
         async with self.pool.acquire() as conn:
-            # Acquire advisory lock to prevent concurrent migration runs
+            # HIGH-04: Use pg_try_advisory_lock with a timeout loop so we don't hang
             logger.info("Acquiring migration advisory lock...")
-            await conn.execute(f"SELECT pg_advisory_lock({ADVISORY_LOCK_ID})")
+            await self._acquire_advisory_lock(conn)
             try:
                 await self._ensure_schema_migrations_table(conn)
                 applied = await self._get_applied_migrations(conn)
@@ -73,16 +87,28 @@ class Migrator:
                 migrations_run = 0
 
                 for version, name, filepath in pending:
+                    if up_to_version is not None and version > up_to_version:
+                        break
+
                     checksum = self._file_checksum(filepath)
 
                     if version in applied_versions:
-                        # Already applied — check for tampering
+                        # Already applied — check for tampering (MEDIUM-02)
                         if applied_versions[version] != checksum:
-                            logger.warning(
-                                "Migration %03d_%s checksum mismatch! "
-                                "Expected %s, got %s. File may have been modified after application.",
-                                version, name, applied_versions[version], checksum,
-                            )
+                            if self.force:
+                                logger.warning(
+                                    "Migration %03d_%s checksum mismatch! "
+                                    "Expected %s, got %s. File may have been modified after application. "
+                                    "(--force: continuing anyway)",
+                                    version, name, applied_versions[version], checksum,
+                                )
+                            else:
+                                raise RuntimeError(
+                                    f"Migration {version:03d}_{name} checksum mismatch! "
+                                    f"Expected {applied_versions[version]}, got {checksum}. "
+                                    f"File may have been modified after application. "
+                                    f"Use --force to override."
+                                )
                         continue
 
                     # Apply this migration
@@ -90,16 +116,33 @@ class Migrator:
                     sql = filepath.read_text(encoding="utf-8")
                     start = time.monotonic()
 
-                    try:
-                        await conn.execute(sql)
-                        elapsed = time.monotonic() - start
+                    # HIGH-02: DDL like CREATE INDEX CONCURRENTLY cannot run inside a
+                    # transaction. Migrations that need this should include the marker
+                    # comment "-- no-transaction" at the top of the file.
+                    use_transaction = not sql.lstrip().startswith(NO_TRANSACTION_MARKER)
 
-                        # Record in schema_migrations
-                        await conn.execute(
-                            "INSERT INTO schema_migrations (version, name, checksum) "
-                            "VALUES ($1, $2, $3)",
-                            version, name, checksum,
-                        )
+                    try:
+                        if use_transaction:
+                            async with conn.transaction():
+                                await conn.execute(sql)
+                                await conn.execute(
+                                    "INSERT INTO schema_migrations (version, name, checksum) "
+                                    "VALUES ($1, $2, $3)",
+                                    version, name, checksum,
+                                )
+                        else:
+                            logger.info(
+                                "Migration %03d_%s uses -- no-transaction marker, "
+                                "running without transaction wrapper.", version, name,
+                            )
+                            await conn.execute(sql)
+                            await conn.execute(
+                                "INSERT INTO schema_migrations (version, name, checksum) "
+                                "VALUES ($1, $2, $3)",
+                                version, name, checksum,
+                            )
+
+                        elapsed = time.monotonic() - start
                         logger.info(
                             "Migration %03d_%s applied successfully (%.2fs)",
                             version, name, elapsed,
@@ -135,7 +178,7 @@ class Migrator:
         """
         async with self.pool.acquire() as conn:
             logger.info("Acquiring migration advisory lock for rollback...")
-            await conn.execute(f"SELECT pg_advisory_lock({ADVISORY_LOCK_ID})")
+            await self._acquire_advisory_lock(conn)
             try:
                 await self._ensure_schema_migrations_table(conn)
                 applied = await self._get_applied_migrations(conn)
@@ -307,7 +350,70 @@ class Migrator:
         result.sort(key=lambda x: x["version"])
         return result
 
+    async def baseline(self, version: int) -> None:
+        """Mark migrations up to `version` as applied without executing them.
+
+        This lets existing databases record that migrations have already been applied
+        manually or by other means, so the migrator won't try to re-run them.
+
+        Args:
+            version: Mark all migration files with version <= this as applied.
+        """
+        async with self.pool.acquire() as conn:
+            logger.info("Acquiring migration advisory lock for baseline...")
+            await self._acquire_advisory_lock(conn)
+            try:
+                await self._ensure_schema_migrations_table(conn)
+                applied = await self._get_applied_migrations(conn)
+                applied_versions = {m["version"] for m in applied}
+                all_files = self._scan_migration_files()
+
+                count = 0
+                for file_version, name, filepath in all_files:
+                    if file_version > version:
+                        break
+                    if file_version in applied_versions:
+                        logger.info("Migration %03d_%s already recorded, skipping.", file_version, name)
+                        continue
+
+                    checksum = self._file_checksum(filepath)
+                    await conn.execute(
+                        "INSERT INTO schema_migrations (version, name, checksum) "
+                        "VALUES ($1, $2, $3)",
+                        file_version, name, checksum,
+                    )
+                    logger.info("Baselined migration %03d_%s (checksum %s)", file_version, name, checksum)
+                    count += 1
+
+                if count == 0:
+                    logger.info("No new migrations to baseline (all up to version %d already recorded).", version)
+                else:
+                    logger.info("Baselined %d migration(s) up to version %d.", count, version)
+            finally:
+                await conn.execute(f"SELECT pg_advisory_unlock({ADVISORY_LOCK_ID})")
+                logger.info("Released migration advisory lock.")
+
     # ── Internal helpers ───────────────────────────────────
+
+    async def _acquire_advisory_lock(self, conn) -> None:
+        """Acquire advisory lock with a timeout loop (HIGH-04).
+
+        Uses pg_try_advisory_lock to avoid hanging indefinitely. Retries for up
+        to LOCK_TIMEOUT seconds before raising a RuntimeError.
+        """
+        deadline = time.monotonic() + LOCK_TIMEOUT
+        while True:
+            acquired = await conn.fetchval(
+                f"SELECT pg_try_advisory_lock({ADVISORY_LOCK_ID})"
+            )
+            if acquired:
+                return
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"Could not acquire migration advisory lock within {LOCK_TIMEOUT}s. "
+                    f"Another migration may be running."
+                )
+            await asyncio.sleep(1)
 
     async def _ensure_schema_migrations_table(self, conn) -> None:
         """Create the schema_migrations table if it doesn't exist."""

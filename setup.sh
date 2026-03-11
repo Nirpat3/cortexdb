@@ -20,9 +20,6 @@ DATA_PATH="${CORTEX_DATA_PATH:-./data}"
 echo "-> Creating data directories at: $DATA_PATH"
 mkdir -p "$DATA_PATH"/{postgresql,redis,stream,vector,immutable}
 
-echo "-> Creating init-scripts directory"
-mkdir -p init-scripts
-
 echo "-> Generating secret key (change in production!)"
 if [ -z "$CORTEX_SECRET_KEY" ]; then
     export CORTEX_SECRET_KEY=$(openssl rand -hex 32 2>/dev/null || python3 -c "import secrets; print(secrets.token_hex(32))")

@@ -1,0 +1,1 @@
+-- Cannot drop schema_migrations as it tracks migration state itself
