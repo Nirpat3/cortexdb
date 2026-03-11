@@ -202,8 +202,24 @@ async def lifespan(app: FastAPI):
     # Auto-migrate database schema
     global _migrator
     from cortexdb.core.migrator import Migrator
-    _migrator = Migrator(db.engines.get("relational").pool)
+    auto_migrate = os.environ.get("CORTEXDB_AUTO_MIGRATE", "true").lower() in ("true", "1", "yes")
+    _migrator = Migrator(db.engines.get("relational").pool, auto_migrate=auto_migrate)
     await _migrator.run()
+
+    # Post-migration compatibility check
+    if not await _migrator.check_compatibility():
+        current = await _migrator.get_current_version()
+        latest = await _migrator.get_latest_version()
+        logger.error(
+            "Database schema (version %d) is behind migration files (version %d). "
+            "Run `python -m cortexdb.migrate up` to apply pending migrations.",
+            current, latest,
+        )
+        if not auto_migrate:
+            raise SystemExit(
+                f"Database schema is behind (v{current} < v{latest}). "
+                f"Run `python -m cortexdb.migrate up` to apply pending migrations."
+            )
 
     # Grid
     grid_sm = NodeStateMachine()

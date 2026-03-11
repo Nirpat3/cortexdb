@@ -2,7 +2,7 @@
 CortexDB Auto-Migration System
 - Tracks applied migrations in `schema_migrations` table
 - Applies pending migrations on server startup
-- Never backtracks (forward-only)
+- Supports rollback via companion .down.sql files
 - Safe for concurrent startup (advisory lock)
 """
 
@@ -26,19 +26,36 @@ ADVISORY_LOCK_ID = 42
 # Pattern: NNN_name.sql where NNN is a zero-padded integer
 MIGRATION_PATTERN = re.compile(r"^(\d+)_(.+)\.sql$")
 
+# Pattern: NNN_name.down.sql — companion rollback file
+ROLLBACK_PATTERN = re.compile(r"^(\d+)_(.+)\.down\.sql$")
+
 
 class Migrator:
-    """Forward-only database migration engine with advisory locking."""
+    """Database migration engine with advisory locking, rollback, and dry-run support."""
 
-    def __init__(self, pool):
+    def __init__(self, pool, auto_migrate: bool = True):
         """
         Args:
             pool: asyncpg connection pool
+            auto_migrate: When False, run() only checks compatibility but does not apply.
         """
         self.pool = pool
+        self.auto_migrate = auto_migrate
 
     async def run(self) -> None:
-        """Main entry point — apply all pending migrations."""
+        """Main entry point — apply all pending migrations (or check-only if auto_migrate=False)."""
+        if not self.auto_migrate:
+            compatible = await self.check_compatibility()
+            if not compatible:
+                current = await self.get_current_version()
+                latest = await self.get_latest_version()
+                raise RuntimeError(
+                    f"Database is at version {current} but migration files go up to {latest}. "
+                    f"Run `python -m cortexdb.migrate up` to apply pending migrations."
+                )
+            logger.info("auto_migrate=False: database schema is compatible, skipping migration.")
+            return
+
         async with self.pool.acquire() as conn:
             # Acquire advisory lock to prevent concurrent migration runs
             logger.info("Acquiring migration advisory lock...")
@@ -105,6 +122,157 @@ class Migrator:
             finally:
                 await conn.execute(f"SELECT pg_advisory_unlock({ADVISORY_LOCK_ID})")
                 logger.info("Released migration advisory lock.")
+
+    async def rollback(self, target_version: int) -> None:
+        """Roll back applied migrations down to (but not including) target_version.
+
+        For each applied migration with version > target_version, the companion
+        NNN_name.down.sql file is executed and the schema_migrations row is removed.
+
+        Args:
+            target_version: The version to roll back to. Migrations with version > target_version
+                            will be undone. Use 0 to roll back everything.
+        """
+        async with self.pool.acquire() as conn:
+            logger.info("Acquiring migration advisory lock for rollback...")
+            await conn.execute(f"SELECT pg_advisory_lock({ADVISORY_LOCK_ID})")
+            try:
+                await self._ensure_schema_migrations_table(conn)
+                applied = await self._get_applied_migrations(conn)
+                rollback_files = self._scan_rollback_files()
+
+                # Sort applied descending so we roll back newest first
+                to_rollback = sorted(
+                    [m for m in applied if m["version"] > target_version],
+                    key=lambda m: m["version"],
+                    reverse=True,
+                )
+
+                if not to_rollback:
+                    logger.info("No migrations to roll back (already at or below version %d).", target_version)
+                    return
+
+                rollback_map = {v: fp for v, _name, fp in rollback_files}
+
+                for m in to_rollback:
+                    version = m["version"]
+                    name = m["name"]
+
+                    if version not in rollback_map:
+                        raise RuntimeError(
+                            f"Cannot roll back migration {version:03d}_{name}: "
+                            f"no companion .down.sql file found in {MIGRATIONS_DIR}"
+                        )
+
+                    down_path = rollback_map[version]
+                    down_sql = down_path.read_text(encoding="utf-8")
+
+                    logger.info("Rolling back migration %03d_%s ...", version, name)
+                    start = time.monotonic()
+
+                    try:
+                        async with conn.transaction():
+                            await conn.execute(down_sql)
+                            await conn.execute(
+                                "DELETE FROM schema_migrations WHERE version = $1", version
+                            )
+                        elapsed = time.monotonic() - start
+                        logger.info(
+                            "Migration %03d_%s rolled back successfully (%.2fs)",
+                            version, name, elapsed,
+                        )
+                    except Exception as e:
+                        elapsed = time.monotonic() - start
+                        logger.error(
+                            "Rollback of %03d_%s FAILED after %.2fs: %s",
+                            version, name, elapsed, e,
+                        )
+                        raise
+
+                logger.info("Rolled back %d migration(s) to version %d.", len(to_rollback), target_version)
+
+            finally:
+                await conn.execute(f"SELECT pg_advisory_unlock({ADVISORY_LOCK_ID})")
+                logger.info("Released migration advisory lock.")
+
+    async def dry_run(self) -> List[Dict[str, Any]]:
+        """Return list of pending migrations that would be applied by run(), without executing them."""
+        async with self.pool.acquire() as conn:
+            await self._ensure_schema_migrations_table(conn)
+            applied = await self._get_applied_migrations(conn)
+
+        applied_versions = {m["version"] for m in applied}
+        pending_files = self._scan_migration_files()
+
+        result = []
+        for version, name, filepath in pending_files:
+            if version not in applied_versions:
+                result.append({
+                    "version": version,
+                    "name": name,
+                    "filepath": str(filepath),
+                    "action": "apply",
+                })
+        return result
+
+    async def dry_run_rollback(self, target_version: int) -> List[Dict[str, Any]]:
+        """Return list of migrations that would be rolled back, without executing them."""
+        async with self.pool.acquire() as conn:
+            await self._ensure_schema_migrations_table(conn)
+            applied = await self._get_applied_migrations(conn)
+
+        rollback_files = self._scan_rollback_files()
+        rollback_map = {v: fp for v, _name, fp in rollback_files}
+
+        to_rollback = sorted(
+            [m for m in applied if m["version"] > target_version],
+            key=lambda m: m["version"],
+            reverse=True,
+        )
+
+        result = []
+        for m in to_rollback:
+            version = m["version"]
+            has_down = version in rollback_map
+            result.append({
+                "version": version,
+                "name": m["name"],
+                "has_down_file": has_down,
+                "down_filepath": str(rollback_map[version]) if has_down else None,
+                "action": "rollback",
+            })
+        return result
+
+    async def get_latest_version(self) -> int:
+        """Return the highest version number among migration files on disk."""
+        files = self._scan_migration_files()
+        if not files:
+            return 0
+        return max(v for v, _name, _fp in files)
+
+    async def get_current_version(self) -> int:
+        """Return the highest applied migration version from the database."""
+        async with self.pool.acquire() as conn:
+            await self._ensure_schema_migrations_table(conn)
+            row = await conn.fetchval(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_migrations"
+            )
+            return row
+
+    async def check_compatibility(self) -> bool:
+        """Check if the database is up to date with migration files.
+
+        Returns True if there are no pending migrations, False otherwise.
+        """
+        current = await self.get_current_version()
+        latest = await self.get_latest_version()
+        if current < latest:
+            logger.warning(
+                "Database version %d is behind latest migration file version %d.",
+                current, latest,
+            )
+            return False
+        return True
 
     async def get_status(self) -> List[Dict[str, Any]]:
         """Return list of applied migrations with pending status info."""
@@ -176,6 +344,23 @@ class Migrator:
 
         migrations.sort(key=lambda x: x[0])
         return migrations
+
+    def _scan_rollback_files(self) -> List[tuple]:
+        """Scan migrations directory for .down.sql files, return sorted (version, name, path)."""
+        if not MIGRATIONS_DIR.exists():
+            logger.warning("Migrations directory not found: %s", MIGRATIONS_DIR)
+            return []
+
+        rollbacks = []
+        for f in MIGRATIONS_DIR.iterdir():
+            match = ROLLBACK_PATTERN.match(f.name)
+            if match:
+                version = int(match.group(1))
+                name = match.group(2)
+                rollbacks.append((version, name, f))
+
+        rollbacks.sort(key=lambda x: x[0])
+        return rollbacks
 
     @staticmethod
     def _file_checksum(filepath: Path) -> str:
