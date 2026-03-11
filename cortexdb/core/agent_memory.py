@@ -62,30 +62,6 @@ class AgentMemory:
         """
         self.engines = engines
         self.embedding = embedding
-        self._schema_initialized = False
-
-    async def _ensure_schema(self):
-        """Create the agent_memories table if it does not exist.
-
-        Runs the schema SQL idempotently on first use.
-        """
-        if self._schema_initialized:
-            return
-
-        relational = self.engines.get("relational")
-        if not relational or not relational.pool:
-            return
-
-        import pathlib
-        schema_path = pathlib.Path(__file__).parent / "agent_memory_schema.sql"
-        if schema_path.exists():
-            schema_sql = schema_path.read_text(encoding="utf-8")
-            async with relational.pool.acquire() as conn:
-                await conn.execute(schema_sql)
-            logger.info("Agent memory schema initialized")
-
-        self._schema_initialized = True
-
     async def _ensure_vector_collection(self):
         """Ensure the Qdrant collection for agent memories exists."""
         vector = self.engines.get("vector")
@@ -126,8 +102,6 @@ class AgentMemory:
             )
         importance = max(0.0, min(1.0, importance))
         metadata = metadata or {}
-
-        await self._ensure_schema()
 
         memory_id = str(uuid.uuid4())
         now = time.time()
@@ -559,8 +533,6 @@ class AgentMemory:
                 "specified to prevent accidental bulk deletion."
             )
 
-        await self._ensure_schema()
-
         # 1. Find matching memory IDs from PostgreSQL
         memory_ids = await self._find_memory_ids(
             agent_id=agent_id,
@@ -706,8 +678,6 @@ class AgentMemory:
         if not target_agent_ids:
             raise ValueError("target_agent_ids must be a non-empty list")
 
-        await self._ensure_schema()
-
         # 1. Verify ownership in PostgreSQL
         relational = self.engines.get("relational")
         if not relational or not relational.pool:
@@ -790,7 +760,7 @@ class AgentMemory:
         """Return diagnostic information about the agent memory subsystem."""
         return {
             "status": "active",
-            "schema_initialized": self._schema_initialized,
+            "schema_initialized": True,  # Managed by migration system
             "vector_collection": AGENT_MEMORY_COLLECTION,
             "time_decay_lambda": TIME_DECAY_LAMBDA,
             "working_memory_ttl": WORKING_MEMORY_TTL,

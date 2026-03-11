@@ -854,12 +854,6 @@ class CortexDB:
         if pg_pool:
             try:
                 from cortexdb.core.outbox_worker import OutboxWorker
-                # Install outbox schema
-                import pathlib
-                schema_path = pathlib.Path(__file__).parent / "outbox_schema.sql"
-                if schema_path.exists():
-                    async with pg_pool.acquire() as conn:
-                        await conn.execute(schema_path.read_text())
                 self.outbox_worker = OutboxWorker(pg_pool, self.engines)
                 self.write_fanout._outbox_worker = self.outbox_worker
                 await self.outbox_worker.start()
@@ -882,15 +876,9 @@ class CortexDB:
         # Initialize RAG pipeline
         if self.embedding:
             try:
-                import pathlib
                 from cortexdb.core.chunking import ChunkingPipeline
                 from cortexdb.core.rag import RAGPipeline
                 self.rag = RAGPipeline(self.engines, self.embedding)
-                # Install RAG schema
-                schema_path = pathlib.Path(__file__).parent / "rag_schema.sql"
-                if schema_path.exists() and pg_pool:
-                    async with pg_pool.acquire() as conn:
-                        await conn.execute(schema_path.read_text())
                 logger.info("  + RAG PIPELINE initialized")
             except Exception as e:
                 logger.warning(f"  x RAG PIPELINE unavailable: {e}")

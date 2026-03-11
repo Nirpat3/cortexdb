@@ -624,35 +624,8 @@ class EmbeddingSyncPipeline:
         }
 
     async def install_triggers(self) -> None:
-        """Install the PostgreSQL NOTIFY triggers for all synced tables.
+        """No-op — triggers are now managed by the migration system (migration 013).
 
-        This is idempotent — safe to call on every startup.
-        Reads and executes the SQL from embedding_sync_triggers.sql.
+        This method is retained for backward compatibility.
         """
-        import os
-
-        sql_path = os.path.join(
-            os.path.dirname(__file__), "embedding_sync_triggers.sql"
-        )
-
-        try:
-            with open(sql_path, "r") as f:
-                sql = f.read()
-        except FileNotFoundError:
-            logger.error(
-                "Trigger SQL not found at %s — skipping trigger install",
-                sql_path,
-            )
-            return
-
-        relational = self.engines.get("relational")
-        if not relational or not relational.pool:
-            logger.error("Cannot install triggers: relational engine not connected")
-            return
-
-        try:
-            async with relational.pool.acquire() as conn:
-                await conn.execute(sql)
-            logger.info("Embedding sync triggers installed successfully")
-        except Exception as e:
-            logger.warning("Failed to install embedding sync triggers: %s", e)
+        logger.info("Triggers managed by migration system")
