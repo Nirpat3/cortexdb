@@ -126,18 +126,28 @@ class RAGPipeline:
                         json.dumps(metadata or {}), tenant_id,
                         hashlib.sha256(text.encode()).hexdigest())
 
-                    # Insert new chunks
-                    await conn.executemany("""
-                        INSERT INTO rag_chunks (chunk_id, doc_id, content,
-                            chunk_index, start_char, end_char, token_count,
-                            metadata, tenant_id)
-                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9)
-                        ON CONFLICT (chunk_id) DO UPDATE SET
-                            content=$3, token_count=$7, metadata=$8::jsonb
-                    """, [(chunk.chunk_id, doc_id, chunk.content,
-                           chunk.chunk_index, chunk.start_char, chunk.end_char,
-                           chunk.token_count, json.dumps(chunk.metadata or {}),
-                           tenant_id) for chunk in chunks])
+                    # Insert new chunks (single multi-row INSERT)
+                    if chunks:
+                        cols_per_row = 9
+                        values_clauses = []
+                        params = []
+                        for i, chunk in enumerate(chunks):
+                            base = i * cols_per_row
+                            values_clauses.append(
+                                f"(${base+1},${base+2},${base+3},${base+4},${base+5},${base+6},${base+7},${base+8}::jsonb,${base+9})")
+                            params.extend([
+                                chunk.chunk_id, doc_id, chunk.content,
+                                chunk.chunk_index, chunk.start_char, chunk.end_char,
+                                chunk.token_count, json.dumps(chunk.metadata or {}),
+                                tenant_id])
+                        await conn.execute(f"""
+                            INSERT INTO rag_chunks (chunk_id, doc_id, content,
+                                chunk_index, start_char, end_char, token_count,
+                                metadata, tenant_id)
+                            VALUES {','.join(values_clauses)}
+                            ON CONFLICT (chunk_id) DO UPDATE SET
+                                content=EXCLUDED.content, token_count=EXCLUDED.token_count, metadata=EXCLUDED.metadata
+                        """, *params)
 
             # Clean up orphan vectors from Qdrant (old IDs not in new set)
             orphan_ids = list(old_chunk_ids - new_chunk_ids)
@@ -537,14 +547,23 @@ class RAGPipeline:
                             json.dumps({**(child.metadata or {}),
                                         "level": "child", "parent_id": child.parent_id}),
                             tenant_id))
-                    await conn.executemany("""
-                        INSERT INTO rag_chunks (chunk_id, doc_id, content,
-                            chunk_index, start_char, end_char, token_count,
-                            metadata, tenant_id)
-                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9)
-                        ON CONFLICT (chunk_id) DO UPDATE SET
-                            content=$3, token_count=$7, metadata=$8::jsonb
-                    """, all_chunk_rows)
+                    if all_chunk_rows:
+                        cols_per_row = 9
+                        values_clauses = []
+                        params = []
+                        for i, row in enumerate(all_chunk_rows):
+                            base = i * cols_per_row
+                            values_clauses.append(
+                                f"(${base+1},${base+2},${base+3},${base+4},${base+5},${base+6},${base+7},${base+8}::jsonb,${base+9})")
+                            params.extend(row)
+                        await conn.execute(f"""
+                            INSERT INTO rag_chunks (chunk_id, doc_id, content,
+                                chunk_index, start_char, end_char, token_count,
+                                metadata, tenant_id)
+                            VALUES {','.join(values_clauses)}
+                            ON CONFLICT (chunk_id) DO UPDATE SET
+                                content=EXCLUDED.content, token_count=EXCLUDED.token_count, metadata=EXCLUDED.metadata
+                        """, *params)
 
             # Clean up orphan vectors from Qdrant (old IDs not in new set)
             orphan_ids = list(old_chunk_ids - new_chunk_ids)

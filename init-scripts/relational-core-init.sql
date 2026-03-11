@@ -77,6 +77,9 @@ CREATE TABLE IF NOT EXISTS a2a_tasks (
 CREATE INDEX idx_a2a_tasks_status ON a2a_tasks(status);
 CREATE INDEX idx_a2a_tasks_target ON a2a_tasks(target_agent_id);
 CREATE INDEX idx_a2a_tasks_tenant ON a2a_tasks(tenant_id);
+CREATE INDEX idx_a2a_tasks_source_created ON a2a_tasks(source_agent_id, created_at DESC);
+CREATE INDEX idx_a2a_tasks_target_created ON a2a_tasks(target_agent_id, created_at DESC);
+CREATE INDEX idx_a2a_tasks_tenant_status ON a2a_tasks(tenant_id, status, created_at DESC);
 
 -- ================================================
 -- RELATIONALCORE: Business data tables
@@ -174,6 +177,7 @@ CREATE TABLE IF NOT EXISTS experience_ledger (
 
 CREATE INDEX idx_experience_context ON experience_ledger(context_hash);
 CREATE INDEX idx_experience_task_type ON experience_ledger(task_type);
+CREATE INDEX idx_experience_agent ON experience_ledger(agent_id);
 
 CREATE TABLE IF NOT EXISTS grid_nodes (
     node_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -350,6 +354,7 @@ CREATE TRIGGER immutable_ledger_no_update
 CREATE INDEX idx_ledger_type ON immutable_ledger(entry_type);
 CREATE INDEX idx_ledger_related ON immutable_ledger(related_id);
 CREATE INDEX idx_ledger_time ON immutable_ledger(created_at);
+CREATE INDEX idx_ledger_actor ON immutable_ledger(actor);
 
 -- ================================================
 -- SEED DATA: ASA Standards (21 total)
@@ -570,6 +575,7 @@ CREATE INDEX idx_ce_customer ON customer_events(customer_id, time DESC);
 CREATE INDEX idx_ce_type ON customer_events(event_type, time DESC);
 CREATE INDEX idx_ce_tenant ON customer_events(tenant_id, time DESC);
 CREATE INDEX idx_ce_session ON customer_events(session_id);
+CREATE INDEX idx_ce_customer_type ON customer_events(customer_id, event_type, time DESC);
 
 -- Customer merge history (audit trail in ImmutableCore)
 CREATE TABLE IF NOT EXISTS customer_merges (

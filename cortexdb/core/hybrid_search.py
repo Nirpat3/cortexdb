@@ -49,30 +49,40 @@ class HybridSearch:
         self._reranker = None
         self._reranker_checked = False  # True after first attempt
         self._reranker_available = False
+        self._reranker_lock = asyncio.Lock()
         self._search_count = 0
 
-    def _ensure_reranker(self):
+    async def _ensure_reranker(self):
         """Lazy-load cross-encoder on first use (not at init, to avoid blocking startup).
+
+        Uses asyncio.Lock to prevent concurrent loads, and asyncio.to_thread
+        to avoid blocking the event loop during model loading.
 
         Sets _reranker_checked AFTER init completes to prevent concurrent callers
         from seeing checked=True but reranker=None.
         """
         if self._reranker_checked:
             return
-        try:
-            from sentence_transformers import CrossEncoder
-            self._reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
-            self._reranker_available = True
-            logger.info("Cross-encoder re-ranker loaded: ms-marco-MiniLM-L-6-v2")
-        except ImportError:
-            self._reranker_available = False
-            logger.info("Cross-encoder not available — hybrid search will skip re-ranking. "
-                        "Install: pip install sentence-transformers")
-        except Exception as e:
-            self._reranker_available = False
-            logger.warning(f"Failed to load re-ranker: {e}")
-        finally:
-            self._reranker_checked = True  # set AFTER init to avoid race
+        async with self._reranker_lock:
+            # Double-check after acquiring lock
+            if self._reranker_checked:
+                return
+            try:
+                from sentence_transformers import CrossEncoder
+                self._reranker = await asyncio.to_thread(
+                    CrossEncoder, "cross-encoder/ms-marco-MiniLM-L-6-v2"
+                )
+                self._reranker_available = True
+                logger.info("Cross-encoder re-ranker loaded: ms-marco-MiniLM-L-6-v2")
+            except ImportError:
+                self._reranker_available = False
+                logger.info("Cross-encoder not available — hybrid search will skip re-ranking. "
+                            "Install: pip install sentence-transformers")
+            except Exception as e:
+                self._reranker_available = False
+                logger.warning(f"Failed to load re-ranker: {e}")
+            finally:
+                self._reranker_checked = True  # set AFTER init to avoid race
 
     async def search(self, query: str, collection: str = "documents",
                      limit: int = 10, tenant_id: str = None,
@@ -109,7 +119,7 @@ class HybridSearch:
 
         # Optional cross-encoder re-ranking (lazy-loaded on first use)
         if rerank and fused:
-            self._ensure_reranker()
+            await self._ensure_reranker()
         if rerank and self._reranker_available and fused:
             fused = self._rerank(query, fused[:rerank_top_k])
 

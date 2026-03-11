@@ -28,3 +28,5 @@ CREATE TABLE IF NOT EXISTS rag_chunks (
 CREATE INDEX IF NOT EXISTS idx_rag_chunks_doc ON rag_chunks (doc_id, chunk_index);
 CREATE INDEX IF NOT EXISTS idx_rag_docs_tenant ON rag_documents (tenant_id, collection);
 CREATE INDEX IF NOT EXISTS idx_rag_chunks_tenant ON rag_chunks (tenant_id);
+CREATE INDEX IF NOT EXISTS idx_rag_chunks_fts ON rag_chunks USING GIN(to_tsvector('english', content));
+CREATE INDEX IF NOT EXISTS idx_rag_chunks_doc_tenant ON rag_chunks(doc_id, tenant_id);

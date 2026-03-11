@@ -96,18 +96,12 @@ class VectorEngine(BaseEngine):
             if collection in self._collections_created:
                 return
             try:
-                existing = await self.client.get_collections()
-                existing_names = {c.name for c in existing.collections}
-                self._collections_created.update(existing_names)
-                if collection in existing_names:
-                    return
                 await self.client.create_collection(
                     collection,
                     vectors_config=VectorParams(size=VECTOR_DIM, distance=Distance.COSINE)
                 )
                 self._collections_created.add(collection)
             except Exception as e:
-                # Only cache if error indicates "already exists"
                 err_str = str(e).lower()
                 if "already exists" in err_str or "conflict" in err_str:
                     self._collections_created.add(collection)
@@ -126,7 +120,7 @@ class VectorEngine(BaseEngine):
 
         await self._ensure_collection(collection)
 
-        query_vector = embed_text(query_text)
+        query_vector = await asyncio.to_thread(embed_text, query_text)
 
         # Build tenant filter if provided
         query_filter = None
@@ -165,7 +159,7 @@ class VectorEngine(BaseEngine):
             if "vector" in p:
                 vec = p["vector"]
             elif "text" in p:
-                vec = embed_text(p["text"])
+                vec = await asyncio.to_thread(embed_text, p["text"])
             else:
                 skipped += 1
                 logger.warning(f"upsert_vectors: point missing 'vector' and 'text', skipped. Keys: {list(p.keys())}")
@@ -215,7 +209,7 @@ class VectorEngine(BaseEngine):
         point_id = payload.pop("_id", hashlib.sha256(str(payload).encode()).hexdigest()[:32])
 
         if text:
-            vec = embed_text(text)
+            vec = await asyncio.to_thread(embed_text, text)
         elif vector:
             vec = vector
         else:

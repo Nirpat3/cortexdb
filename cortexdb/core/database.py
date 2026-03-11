@@ -11,6 +11,7 @@ Query flow: Security -> Parser -> Router -> Cache Cascade -> Engine(s) -> Bridge
 """
 
 import asyncio
+import copy
 import hashlib
 import json
 import os
@@ -182,7 +183,6 @@ class ReadCascade:
 
         # R0: Process-Local LRU Cache (lock-protected to prevent concurrent corruption)
         r0_key = f"{cache_prefix}{qhash}"
-        import copy
         async with self._r0_lock:
             if r0_key in self._r0_cache:
                 self._r0_cache.move_to_end(r0_key)
@@ -364,6 +364,7 @@ class ReadCascade:
     async def _r0_set(self, key: str, value: Any):
         """Add to R0 cache. Acquires _r0_lock internally."""
         # Size guard: skip caching entries larger than 1MB
+        # Perform expensive serialization and deepcopy BEFORE acquiring lock
         try:
             entry_size = len(json.dumps(value, default=str))
             if entry_size > self._r0_max_entry_bytes:
@@ -371,14 +372,15 @@ class ReadCascade:
         except (TypeError, ValueError):
             pass
 
-        import copy
+        value_copy = copy.deepcopy(value)
+
         async with self._r0_lock:
             # LRU eviction: remove least recently used (front of OrderedDict)
             while len(self._r0_cache) >= self._r0_max_size:
                 self._r0_cache.popitem(last=False)
 
-            # Store a copy to prevent callers from mutating cached data
-            self._r0_cache[key] = copy.deepcopy(value)
+            # Store the pre-computed copy to prevent callers from mutating cached data
+            self._r0_cache[key] = value_copy
 
     def invalidate_tenant_cache(self, tenant_id: str):
         """Evict all R0 cache entries for a specific tenant after writes."""
@@ -973,11 +975,17 @@ class CortexDB:
             "encryption": self.field_encryption.get_stats() if self.field_encryption else {"status": "disabled"},
             "compliance_audit": self.compliance_audit.get_stats() if self.compliance_audit else {"status": "not_loaded"},
         }
-        for name, engine in self.engines.items():
+        async def _check_engine(name, engine):
             try:
-                health["engines"][name] = {"status": "healthy", **(await engine.health())}
+                return name, {"status": "healthy", **(await engine.health())}
             except Exception as e:
-                health["engines"][name] = {"status": "unhealthy", "error": str(e)}
+                return name, {"status": "unhealthy", "error": str(e)}
+
+        results = await asyncio.gather(
+            *[_check_engine(n, e) for n, e in self.engines.items()])
+        for name, result in results:
+            health["engines"][name] = result
+            if result["status"] == "unhealthy":
                 health["status"] = "degraded"
         return health
 

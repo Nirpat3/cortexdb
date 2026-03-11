@@ -29,6 +29,7 @@ class OutboxWorker:
     CLEANUP_AGE_HOURS = 24    # delete completed entries older than this
     STUCK_TIMEOUT_SECONDS = 300  # 5 min: reset stuck 'processing' entries
     RECOVER_STUCK_INTERVAL = 60.0  # seconds between stuck-recovery runs
+    DISPATCH_CONCURRENCY = 10     # max concurrent dispatches per batch
 
     def __init__(self, pool: Any, engines: Dict[str, Any]):
         self.pool = pool
@@ -155,12 +156,18 @@ class OutboxWorker:
                 RETURNING *
             """, self.BATCH_SIZE)
 
-        # Process dispatches individually, acquiring a new connection only for
-        # the status update after each dispatch (avoids holding a connection
-        # during slow engine.write() calls).
-        for row in rows:
-            async with self.pool.acquire() as conn:
-                await self._dispatch(conn, row)
+        # Process dispatches concurrently with a semaphore to cap parallelism,
+        # acquiring a new connection only for the status update after each
+        # dispatch (avoids holding a connection during slow engine.write() calls).
+        sem = asyncio.Semaphore(self.DISPATCH_CONCURRENCY)
+
+        async def _dispatch_with_limit(row):
+            async with sem:
+                async with self.pool.acquire() as conn:
+                    await self._dispatch(conn, row)
+
+        await asyncio.gather(*[_dispatch_with_limit(row) for row in rows],
+                             return_exceptions=True)
 
     async def _dispatch(self, conn: Any, row: Any):
         """Dispatch a single outbox entry to its target engine."""
