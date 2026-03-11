@@ -5,7 +5,7 @@
 FROM node:20.11-alpine AS deps
 WORKDIR /app
 COPY package.json package-lock.json* ./
-RUN npm ci || npm install
+RUN npm ci --legacy-peer-deps || npm install --legacy-peer-deps
 
 FROM node:20.11-alpine AS builder
 WORKDIR /app
@@ -34,8 +34,8 @@ COPY --from=builder /app/public ./public
 
 USER nextjs
 
-HEALTHCHECK --interval=10s --timeout=3s --retries=3 \
-    CMD wget -qO- http://localhost:3000/ || exit 1
+HEALTHCHECK --interval=10s --timeout=3s --retries=3 --start-period=20s \
+    CMD wget -qO- http://$(hostname -i | awk '{print $1}'):3000/ || exit 1
 
 EXPOSE 3000
 

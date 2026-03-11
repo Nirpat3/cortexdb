@@ -80,7 +80,7 @@ services:
       stream-core:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5401/health/live"]
+      test: ["CMD", "curl", "-f", "http://localhost:5400/health/live"]
       interval: 5s
       timeout: 3s
       retries: 3
@@ -105,7 +105,7 @@ services:
     image: citusdata/citus:12.1
     container_name: cortex-relational
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:5433:5432"
     environment:
       - POSTGRES_USER=cortex
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
@@ -291,11 +291,9 @@ services:
     environment:
       - QDRANT__SERVICE__GRPC_PORT=6334
       - QDRANT__SERVICE__HTTP_PORT=6333
-      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY:?Set QDRANT_API_KEY in .env}
       - QDRANT__STORAGE__PERFORMANCE__MAX_SEARCH_THREADS=2
-      - QDRANT__STORAGE__OPTIMIZERS__INDEXING_THRESHOLD=20000
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:6333/healthz || exit 1"]
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/6333' 2>/dev/null || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 3
@@ -433,11 +431,11 @@ services:
       cortex-router:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/ || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://$(hostname -i | awk '{print $1}'):3000/ || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 3
-      start_period: 15s
+      start_period: 20s
     networks:
       - cortex-net
     deploy:
