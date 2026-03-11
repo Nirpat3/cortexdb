@@ -303,7 +303,7 @@ Every query returns:
 Writes that fan out to multiple engines use a transactional outbox pattern to guarantee
 delivery. The outbox worker (`cortexdb/core/outbox_worker.py`) polls the `outbox` table
 and dispatches pending events to async engines. The schema is defined in
-`init-scripts/outbox_schema.sql`.
+`db/migrations/011_outbox_schema.sql`.
 
 If an async engine is temporarily unavailable, the outbox retries with exponential backoff.
 This replaces fire-and-forget async dispatch and ensures no events are lost.
@@ -960,7 +960,7 @@ POST /v1/admin/indexes/create?concurrently=true
 
 CortexDB provides a persistent memory layer for AI agents, allowing them to store, recall,
 forget, and share contextual memories across sessions. Implementation lives in
-`cortexdb/mcp/agent_memory.py` with the schema in `init-scripts/agent_memory_schema.sql`.
+`cortexdb/mcp/agent_memory.py` with the schema in `db/migrations/012_agent_memory_schema.sql`.
 
 ### REST Endpoints
 
@@ -1017,7 +1017,7 @@ These tools appear in `GET /v1/mcp/tools` alongside the existing tool set.
 
 The embedding sync pipeline keeps vector embeddings in Qdrant synchronized with relational
 data in PostgreSQL. Implementation is in `cortexdb/core/embedding_sync.py`, with database
-triggers defined in `init-scripts/embedding_sync_triggers.sql`.
+triggers defined in `db/migrations/013_embedding_sync_triggers.sql`.
 
 ### How It Works
 
