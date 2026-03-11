@@ -166,7 +166,7 @@ class CitusShardManager:
         for table in REFERENCE_TABLES:
             try:
                 await engine.execute(
-                    f"SELECT create_reference_table('{table}')")
+                    "SELECT create_reference_table(quote_ident($1))", {"t": table})
                 results["reference"].append(table)
             except Exception as e:
                 if "already distributed" not in str(e).lower():
@@ -182,17 +182,20 @@ class CitusShardManager:
             try:
                 if strategy == "append":
                     await engine.execute(
-                        f"SELECT create_distributed_table('{table}', '{col}', "
-                        f"colocate_with => 'none', distribution_type => 'append')")
+                        "SELECT create_distributed_table(quote_ident($1), quote_ident($2), "
+                        "colocate_with => 'none', distribution_type => 'append')",
+                        {"t": table, "c": col})
                 elif colocate and colocate in colocation_groups:
                     # Co-locate with existing group
                     ref_table = colocation_groups[colocate]
                     await engine.execute(
-                        f"SELECT create_distributed_table('{table}', '{col}', "
-                        f"colocate_with => '{ref_table}')")
+                        "SELECT create_distributed_table(quote_ident($1), quote_ident($2), "
+                        "colocate_with => quote_ident($3))",
+                        {"t": table, "c": col, "r": ref_table})
                 else:
                     await engine.execute(
-                        f"SELECT create_distributed_table('{table}', '{col}')")
+                        "SELECT create_distributed_table(quote_ident($1), quote_ident($2))",
+                        {"t": table, "c": col})
                     if colocate:
                         colocation_groups[colocate] = table
 
@@ -355,7 +358,8 @@ class CitusShardManager:
 
         try:
             await engine.execute(
-                f"SELECT alter_table_set_access_method('{table_name}', 'columnar')")
+                "SELECT alter_table_set_access_method(quote_ident($1), 'columnar')",
+                {"t": table_name})
             return {"status": "converted", "table": table_name, "storage": "columnar"}
         except Exception as e:
             return {"status": "error", "error": str(e)}

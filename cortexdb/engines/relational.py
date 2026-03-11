@@ -3,6 +3,7 @@ Wraps PostgreSQL 16 + Citus + TimescaleDB extensions.
 ACID transactions, business data, and the backbone of CortexDB."""
 
 import json
+import os
 from typing import Any, Dict, Optional
 from cortexdb.engines import BaseEngine
 
@@ -21,7 +22,10 @@ class RelationalEngine(BaseEngine):
         if asyncpg is None:
             raise ImportError("asyncpg required: pip install asyncpg")
         self.pool = await asyncpg.create_pool(
-            self.url, min_size=2, max_size=20, command_timeout=30
+            self.url,
+            min_size=int(os.getenv("CORTEX_PG_POOL_MIN", "10")),
+            max_size=int(os.getenv("CORTEX_PG_POOL_MAX", "50")),
+            command_timeout=30,
         )
 
     async def close(self):
