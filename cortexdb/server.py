@@ -7,6 +7,7 @@ For simple CRUD, use the TypeScript SDK (@cortexdb/sdk) which connects directly 
 Run: uvicorn cortexdb.server:app --host 0.0.0.0 --port 5400
 """
 
+import asyncio
 import os
 import time
 import logging
@@ -14,7 +15,7 @@ import secrets
 import hashlib
 from fastapi import FastAPI, HTTPException, Request, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Any, Dict, Optional, List
 from contextlib import asynccontextmanager
 
@@ -47,6 +48,7 @@ from cortexdb.compliance.encryption import FieldEncryption, KeyManager
 from cortexdb.compliance.audit import ComplianceAudit, AuditEventType
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+logger = logging.getLogger("cortexdb.server")
 
 db: Optional[CortexDB] = None
 grid_sm: Optional[NodeStateMachine] = None
@@ -228,10 +230,34 @@ def _tenant_id(request: Request) -> Optional[str]:
     return getattr(request.state, "tenant_id", None)
 
 
+# -- Consistent Error Envelope --
+from starlette.responses import JSONResponse
+
+@app.exception_handler(HTTPException)
+async def _http_exception_handler(request: Request, exc: HTTPException):
+    """Return a consistent error envelope for all HTTP exceptions."""
+    detail = exc.detail
+    if isinstance(detail, dict):
+        return JSONResponse({"error": detail}, status_code=exc.status_code)
+    return JSONResponse({"error": {"code": exc.status_code, "message": str(detail)}},
+                        status_code=exc.status_code)
+
+@app.exception_handler(PermissionError)
+async def _permission_error_handler(request: Request, exc: PermissionError):
+    return JSONResponse({"error": {"code": 403, "message": "Permission denied"}},
+                        status_code=403)
+
+@app.exception_handler(Exception)
+async def _generic_error_handler(request: Request, exc: Exception):
+    logger.error(f"Unhandled exception: {exc}", exc_info=True)
+    return JSONResponse({"error": {"code": 500, "message": "Internal server error"}},
+                        status_code=500)
+
+
 # -- Models --
 
 class QueryRequest(BaseModel):
-    cortexql: str
+    cortexql: str = Field(..., max_length=10000)
     params: Optional[Dict] = None
     hint: Optional[str] = None
 
@@ -317,7 +343,10 @@ async def cortexql_query(req: QueryRequest, request: Request):
 @app.post("/v1/write")
 async def cortexql_write(req: WriteRequest, request: Request):
     tid = _tenant_id(request)
-    result = await db.write(req.data_type, req.payload, req.actor, tenant_id=tid)
+    try:
+        result = await db.write(req.data_type, req.payload, req.actor, tenant_id=tid)
+    except PermissionError as e:
+        raise HTTPException(403, detail={"error": "blocked_by_amygdala", "message": str(e)})
     if metrics:
         metrics.record_write(req.data_type, result.get("latency_ms", 0),
                              len(result.get("sync", {})), len(result.get("async", {})))
@@ -373,12 +402,23 @@ async def health_metrics():
 # -- Admin Endpoints --
 
 def _require_admin(request):
-    """Check X-Tenant-ID header for admin access on internal endpoints."""
-    tid = request.headers.get("X-Tenant-ID", "")
-    if tid != "__admin__":
-        from starlette.responses import JSONResponse
-        return JSONResponse({"error": "admin access required"}, status_code=403)
-    return None
+    """Verify admin access via X-Admin-Token header (HMAC-verified).
+
+    Falls back to checking the authenticated tenant_id from middleware.
+    Never relies solely on a trivially-spoofable header value.
+    """
+    from starlette.responses import JSONResponse
+    # Primary: check X-Admin-Token against configured admin token
+    admin_token = os.environ.get("CORTEX_ADMIN_TOKEN", "")
+    provided = request.headers.get("X-Admin-Token", "")
+    if admin_token and provided and secrets.compare_digest(provided, admin_token):
+        return None
+    # Fallback: check middleware-authenticated tenant_id
+    tid = getattr(request.state, "tenant_id", None) or request.headers.get("X-Tenant-ID", "")
+    if tid == "__admin__" and admin_token and secrets.compare_digest(
+            request.headers.get("X-Admin-Token", ""), admin_token):
+        return None
+    return JSONResponse({"error": "admin authentication required"}, status_code=403)
 
 @app.get("/admin/cache/stats")
 async def cache_stats(request: Request):
@@ -649,10 +689,16 @@ async def mcp_list_tools():
             "server_info": mcp_server.get_server_info() if mcp_server else {}}
 
 @app.post("/v1/mcp/call")
-async def mcp_call_tool(req: MCPToolCallRequest):
+async def mcp_call_tool(req: MCPToolCallRequest, request: Request):
     if not mcp_server:
         raise HTTPException(503, "MCP Server not initialized")
-    result = await mcp_server.call_tool(req.tool, req.input)
+    # Enforce tenant isolation: override any user-supplied tenant_id with
+    # the authenticated tenant from middleware to prevent cross-tenant access.
+    tid = _tenant_id(request)
+    tool_input = dict(req.input)
+    if tid:
+        tool_input["tenant_id"] = tid
+    result = await mcp_server.call_tool(req.tool, tool_input)
     if result.is_error:
         raise HTTPException(400, result.error_message)
     return {"result": result.content}
@@ -701,10 +747,13 @@ async def a2a_list_tasks(request: Request, agent_id: Optional[str] = None,
         tenant_id=_tenant_id(request))}
 
 @app.post("/v1/a2a/task/{task_id}/complete")
-async def a2a_complete_task(task_id: str, output: Dict):
-    task = await a2a_protocol.complete_task(task_id, output)
+async def a2a_complete_task(task_id: str, request: Request, body: dict = None):
+    if not body or "output" not in body:
+        raise HTTPException(422, "Required field: output")
+    agent_id = body.get("agent_id") or request.headers.get("X-Agent-ID")
+    task = await a2a_protocol.complete_task(task_id, body["output"], agent_id=agent_id)
     if not task:
-        raise HTTPException(404, "Task not found or not in running state")
+        raise HTTPException(404, "Task not found, wrong state, or unauthorized agent")
     return {"task_id": task.task_id, "status": task.status.value}
 
 

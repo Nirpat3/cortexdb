@@ -52,10 +52,13 @@ class HybridSearch:
         self._search_count = 0
 
     def _ensure_reranker(self):
-        """Lazy-load cross-encoder on first use (not at init, to avoid blocking startup)."""
+        """Lazy-load cross-encoder on first use (not at init, to avoid blocking startup).
+
+        Sets _reranker_checked AFTER init completes to prevent concurrent callers
+        from seeing checked=True but reranker=None.
+        """
         if self._reranker_checked:
             return
-        self._reranker_checked = True
         try:
             from sentence_transformers import CrossEncoder
             self._reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
@@ -68,6 +71,8 @@ class HybridSearch:
         except Exception as e:
             self._reranker_available = False
             logger.warning(f"Failed to load re-ranker: {e}")
+        finally:
+            self._reranker_checked = True  # set AFTER init to avoid race
 
     async def search(self, query: str, collection: str = "documents",
                      limit: int = 10, tenant_id: str = None,

@@ -97,10 +97,14 @@ class Amygdala:
         self._blocks_total = 0
 
     def assess(self, query: str, actor: str = "anonymous") -> SecurityVerdict:
+        import unicodedata
         start = time.perf_counter_ns()
         self._checks_total += 1
         threats = []
-        query_upper = query.upper()
+        # Normalize Unicode (NFKC) and strip zero-width characters to prevent bypass
+        normalized = unicodedata.normalize("NFKC", query)
+        normalized = "".join(c for c in normalized if unicodedata.category(c) != "Cf")
+        query_upper = normalized.upper()
 
         for pattern in self._pattern_set:
             if pattern in query_upper:
@@ -150,6 +154,7 @@ class ReadCascade:
         self.audit = audit  # Optional ComplianceAudit instance
         self.cache_config = SemanticCacheConfig()
         self._r0_cache: OrderedDict = OrderedDict()  # LRU cache
+        self._r0_lock = asyncio.Lock()  # guards _r0_cache and _pending_queries
         self._r0_max_size = 10000
         self._r0_max_entry_bytes = 1024 * 1024  # 1MB max per entry
         self._r0_hits = 0
@@ -174,13 +179,15 @@ class ReadCascade:
         qhash = self._query_hash(query, params, tenant_id)
         cache_prefix = f"tenant:{tenant_id}:" if tenant_id else ""
 
-        # R0: Process-Local LRU Cache
+        # R0: Process-Local LRU Cache (lock-protected to prevent concurrent corruption)
         r0_key = f"{cache_prefix}{qhash}"
+        async with self._r0_lock:
+            if r0_key in self._r0_cache:
+                self._r0_cache.move_to_end(r0_key)
+                self._r0_hits += 1
+                data = self._r0_cache[r0_key]
         if r0_key in self._r0_cache:
-            # Move to end (most recently used) for LRU
-            self._r0_cache.move_to_end(r0_key)
-            self._r0_hits += 1
-            result = QueryResult(data=self._r0_cache[r0_key], tier_served=CacheTier.R0_PROCESS,
+            result = QueryResult(data=data, tier_served=CacheTier.R0_PROCESS,
                                  engines_hit=["r0_cache"],
                                  latency_ms=(time.perf_counter() - start) * 1000, cache_hit=True)
             return self._post_read(result, query, tenant_id)
@@ -229,15 +236,20 @@ class ReadCascade:
         # R3: Persistent Store (with request coalescing to prevent cache stampede)
         if "relational" in self.engines:
             try:
-                # Check if an identical query is already in-flight
-                if qhash in self._pending_queries:
+                # Atomic check-and-insert under lock to prevent TOCTOU
+                async with self._r0_lock:
+                    if qhash in self._pending_queries:
+                        existing_future = self._pending_queries[qhash]
+                    else:
+                        existing_future = None
+                        loop = asyncio.get_running_loop()
+                        future: asyncio.Future = loop.create_future()
+                        self._pending_queries[qhash] = future
+
+                if existing_future is not None:
                     # Coalesce: await the existing future instead of hitting PG again
-                    data = await self._pending_queries[qhash]
+                    data = await existing_future
                 else:
-                    # First request for this query — create a future and execute
-                    loop = asyncio.get_running_loop()
-                    future: asyncio.Future = loop.create_future()
-                    self._pending_queries[qhash] = future
                     try:
                         # CRITICAL FIX: Execute SET LOCAL and query on the SAME
                         # connection in the SAME transaction. Previously, set_rls_context()
@@ -343,6 +355,7 @@ class ReadCascade:
         return data
 
     def _r0_set(self, key: str, value: Any):
+        """Add to R0 cache. Caller should hold _r0_lock in async context."""
         # Size guard: skip caching entries larger than 1MB
         try:
             entry_size = len(json.dumps(value, default=str))
@@ -353,9 +366,11 @@ class ReadCascade:
 
         # LRU eviction: remove least recently used (front of OrderedDict)
         while len(self._r0_cache) >= self._r0_max_size:
-            self._r0_cache.popitem(last=False)  # Pop oldest/least-used
+            self._r0_cache.popitem(last=False)
 
-        self._r0_cache[key] = value
+        # Store a copy to prevent callers from mutating cached data
+        import copy
+        self._r0_cache[key] = copy.deepcopy(value)
 
     def invalidate_tenant_cache(self, tenant_id: str):
         """Evict all R0 cache entries for a specific tenant after writes."""
@@ -364,7 +379,7 @@ class ReadCascade:
         prefix = f"tenant:{tenant_id}:"
         keys_to_evict = [k for k in self._r0_cache if k.startswith(prefix)]
         for k in keys_to_evict:
-            del self._r0_cache[k]
+            self._r0_cache.pop(k, None)  # pop() is safe if key was evicted concurrently
         if keys_to_evict:
             logger.debug("R0 cache: evicted %d entries for tenant %s", len(keys_to_evict), tenant_id)
 

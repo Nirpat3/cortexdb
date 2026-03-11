@@ -60,7 +60,7 @@ def _estimate_tokens(text: str) -> int:
 def _generate_id(doc_id: str, level: str, index: int) -> str:
     """Deterministic hash from doc_id, hierarchy level, and index."""
     raw = f"{doc_id}:{level}:{index}"
-    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+    return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
 
 # ---------------------------------------------------------------------------

@@ -63,29 +63,11 @@ class RAGPipeline:
         # 1. Chunk the document
         chunks = self.chunking.chunk(text, doc_id, metadata)
 
-        # 1.5. Delete existing chunks to prevent orphan vectors on re-ingest
-        await self.delete_document(doc_id, collection, tenant_id)
-
-        # 2. Store document metadata in PG
-        if "relational" in self.engines:
-            pool = self.engines["relational"].pool
-            async with pool.acquire() as conn:
-                await conn.execute("""
-                    INSERT INTO rag_documents (doc_id, collection, chunk_count,
-                        metadata, tenant_id, content_hash)
-                    VALUES ($1, $2, $3, $4::jsonb, $5, $6)
-                    ON CONFLICT (doc_id) DO UPDATE SET
-                        chunk_count = $3, metadata = $4::jsonb,
-                        content_hash = $6, updated_at = NOW()
-                """, doc_id, collection, len(chunks),
-                    json.dumps(metadata or {}), tenant_id,
-                    hashlib.sha256(text.encode()).hexdigest())
-
-        # 3. Embed all chunks in batch (run in thread to avoid blocking event loop)
+        # 2. Embed all chunks in batch (run in thread to avoid blocking event loop)
         texts = [c.content for c in chunks]
         vectors = await asyncio.to_thread(self.embedding.embed_batch, texts)
 
-        # 4. Upsert to Qdrant
+        # 3. Upsert to Qdrant first (idempotent), before deleting old data
         target_collection = f"tenant_{tenant_id}_{collection}" if tenant_id else collection
         if "vector" in self.engines:
             points = []
@@ -106,21 +88,64 @@ class RAGPipeline:
                 })
             await self.engines["vector"].upsert_vectors(target_collection, points)
 
-        # 5. Store chunks in PG (batch insert to avoid N+1 round-trips)
+        # 4. Transactional PG: delete old + insert new in one transaction
+        #    If this fails, Qdrant has the new data (idempotent upsert) but PG
+        #    still has the old data — a retry will succeed cleanly.
         if "relational" in self.engines:
             pool = self.engines["relational"].pool
+            new_chunk_ids = {c.chunk_id for c in chunks}
             async with pool.acquire() as conn:
-                await conn.executemany("""
-                    INSERT INTO rag_chunks (chunk_id, doc_id, content,
-                        chunk_index, start_char, end_char, token_count,
-                        metadata, tenant_id)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9)
-                    ON CONFLICT (chunk_id) DO UPDATE SET
-                        content=$3, token_count=$7, metadata=$8::jsonb
-                """, [(chunk.chunk_id, doc_id, chunk.content,
-                       chunk.chunk_index, chunk.start_char, chunk.end_char,
-                       chunk.token_count, json.dumps(chunk.metadata or {}),
-                       tenant_id) for chunk in chunks])
+                async with conn.transaction():
+                    # Get old chunk IDs for Qdrant cleanup
+                    if tenant_id:
+                        old_rows = await conn.fetch(
+                            "SELECT chunk_id FROM rag_chunks WHERE doc_id = $1 AND tenant_id = $2",
+                            doc_id, tenant_id)
+                    else:
+                        old_rows = await conn.fetch(
+                            "SELECT chunk_id FROM rag_chunks WHERE doc_id = $1", doc_id)
+                    old_chunk_ids = {r["chunk_id"] for r in old_rows}
+
+                    # Delete old PG rows
+                    if tenant_id:
+                        await conn.execute(
+                            "DELETE FROM rag_chunks WHERE doc_id = $1 AND tenant_id = $2",
+                            doc_id, tenant_id)
+                    else:
+                        await conn.execute("DELETE FROM rag_chunks WHERE doc_id = $1", doc_id)
+
+                    # Insert document metadata
+                    await conn.execute("""
+                        INSERT INTO rag_documents (doc_id, collection, chunk_count,
+                            metadata, tenant_id, content_hash)
+                        VALUES ($1, $2, $3, $4::jsonb, $5, $6)
+                        ON CONFLICT (doc_id) DO UPDATE SET
+                            chunk_count = $3, metadata = $4::jsonb,
+                            content_hash = $6, updated_at = NOW()
+                    """, doc_id, collection, len(chunks),
+                        json.dumps(metadata or {}), tenant_id,
+                        hashlib.sha256(text.encode()).hexdigest())
+
+                    # Insert new chunks
+                    await conn.executemany("""
+                        INSERT INTO rag_chunks (chunk_id, doc_id, content,
+                            chunk_index, start_char, end_char, token_count,
+                            metadata, tenant_id)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9)
+                        ON CONFLICT (chunk_id) DO UPDATE SET
+                            content=$3, token_count=$7, metadata=$8::jsonb
+                    """, [(chunk.chunk_id, doc_id, chunk.content,
+                           chunk.chunk_index, chunk.start_char, chunk.end_char,
+                           chunk.token_count, json.dumps(chunk.metadata or {}),
+                           tenant_id) for chunk in chunks])
+
+            # Clean up orphan vectors from Qdrant (old IDs not in new set)
+            orphan_ids = list(old_chunk_ids - new_chunk_ids)
+            if orphan_ids and "vector" in self.engines:
+                try:
+                    await self.engines["vector"].delete_vectors(target_collection, orphan_ids)
+                except Exception as e:
+                    logger.warning(f"Failed to clean orphan vectors for doc {doc_id}: {e}")
 
         self._ingest_count += 1
         return {"doc_id": doc_id, "chunks_created": len(chunks),

@@ -54,7 +54,9 @@ class EmbeddingPipeline:
             )
 
     def embed(self, text: str) -> List[float]:
-        """Embed a single text string."""
+        """Embed a single text string. Returns zero vector for empty/whitespace input."""
+        if not text or not text.strip():
+            return [0.0] * self.EMBEDDING_DIM
         if _model_available and _model:
             embedding = _model.encode(text, normalize_embeddings=True)
             return embedding.tolist()
@@ -63,12 +65,24 @@ class EmbeddingPipeline:
     def embed_batch(self, texts: List[str]) -> List[List[float]]:
         """Embed multiple texts (batched for efficiency)."""
         if _model_available and _model:
-            embeddings = _model.encode(texts, normalize_embeddings=True, batch_size=32)
-            return embeddings.tolist()
-        return [self._hash_embedding(t) for t in texts]
+            # Replace empty texts with a placeholder to avoid meaningless embeddings
+            safe_texts = [t if t and t.strip() else " " for t in texts]
+            embeddings = _model.encode(safe_texts, normalize_embeddings=True, batch_size=32)
+            result = embeddings.tolist()
+            # Zero out vectors for originally-empty texts
+            for i, t in enumerate(texts):
+                if not t or not t.strip():
+                    result[i] = [0.0] * self.EMBEDDING_DIM
+            return result
+        return [self._hash_embedding(t) if t and t.strip() else [0.0] * self.EMBEDDING_DIM
+                for t in texts]
 
     def similarity(self, vec_a: List[float], vec_b: List[float]) -> float:
-        """Cosine similarity between two vectors."""
+        """Cosine similarity between two vectors. Validates dimension match."""
+        if len(vec_a) != len(vec_b):
+            raise ValueError(
+                f"Vector dimension mismatch: {len(vec_a)} vs {len(vec_b)}. "
+                f"Cannot compute similarity between different-dimensional vectors.")
         dot = sum(a * b for a, b in zip(vec_a, vec_b))
         norm_a = sum(a * a for a in vec_a) ** 0.5
         norm_b = sum(b * b for b in vec_b) ** 0.5

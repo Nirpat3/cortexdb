@@ -108,7 +108,7 @@ class CortexMCPServer:
                 input_schema={
                     "type": "object",
                     "properties": {
-                        "state": {"type": "string", "enum": ["SPAWNED", "RUNNING", "WAITING", "COMPLETE", "FAILED"]},
+                        "state": {"type": "string", "enum": ["idle", "running", "paused", "stopped", "error", "active"]},
                         "limit": {"type": "integer", "default": 50},
                     },
                 }),

@@ -352,8 +352,8 @@ class ChunkingPipeline:
         return len(text) // 4
 
     def _generate_chunk_id(self, doc_id: str, chunk_index: int) -> str:
-        """Deterministic chunk ID from doc_id + index."""
-        return hashlib.sha256(f"{doc_id}:{chunk_index}".encode()).hexdigest()[:16]
+        """Deterministic chunk ID from doc_id + index (128 bits / 32 hex chars)."""
+        return hashlib.sha256(f"{doc_id}:{chunk_index}".encode()).hexdigest()[:32]
 
     def _build_word_offsets(self, text: str, words: List[str]) -> List[int]:
         """Pre-compute character offsets for all words in one pass — O(n)."""

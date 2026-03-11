@@ -67,13 +67,20 @@ class SleepCycleScheduler:
         ]
 
     async def run(self) -> SleepCycleResult:
-        """Execute the full sleep cycle."""
+        """Execute the full sleep cycle (lock-guarded against concurrent runs)."""
+        if not hasattr(self, '_run_lock'):
+            self._run_lock = asyncio.Lock()
         if self._running:
             logger.warning("Sleep cycle already running, skipping")
             return SleepCycleResult(started_at=time.time(),
                                     details={"skipped": "already_running"})
 
-        self._running = True
+        async with self._run_lock:
+            if self._running:
+                return SleepCycleResult(started_at=time.time(),
+                                        details={"skipped": "already_running"})
+            self._running = True
+
         result = SleepCycleResult(started_at=time.time())
         logger.info("Sleep cycle STARTED")
 

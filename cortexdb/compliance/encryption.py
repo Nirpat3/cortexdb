@@ -108,16 +108,24 @@ class KeyManager:
         self._rotations = 0
 
     def _derive_default_key(self) -> str:
-        """Derive a default master key using PBKDF2 (DEVELOPMENT ONLY — set CORTEX_MASTER_KEY in production)."""
+        """Derive a master key from CORTEX_SECRET_KEY via PBKDF2.
+
+        Refuses to start with no key material in production mode.
+        """
         secret = os.getenv("CORTEX_SECRET_KEY", "")
+        mode = os.getenv("CORTEX_MODE", "development")
         if not secret or len(secret) < 32:
+            if mode != "development":
+                raise RuntimeError(
+                    "SECURITY: CORTEX_MASTER_KEY or CORTEX_SECRET_KEY (>= 32 chars) "
+                    "must be set in production. Refusing to start with insecure defaults."
+                )
             logger.warning(
-                "SECURITY: CORTEX_SECRET_KEY not set or too short (< 32 chars). "
-                "Set CORTEX_MASTER_KEY or CORTEX_SECRET_KEY for production use."
+                "SECURITY: Using dev-only fallback key. Set CORTEX_MASTER_KEY in production."
             )
             secret = secret or "cortex-dev-key-DO-NOT-USE-IN-PRODUCTION"
-        # Use PBKDF2 with salt instead of bare SHA-256
-        salt = b"cortexdb-kdf-salt-v4"  # Fixed salt for deterministic derivation
+        # Use PBKDF2 with salt — deterministic for same secret
+        salt = b"cortexdb-kdf-salt-v4"
         key = hashlib.pbkdf2_hmac("sha256", secret.encode(), salt, iterations=100_000)
         return key.hex()
 

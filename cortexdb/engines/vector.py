@@ -8,7 +8,9 @@ input (byte-mapping vs struct.unpack). Now delegates all embedding to
 EmbeddingPipeline as the single source of truth.
 """
 
+import asyncio
 import hashlib
+import json
 import logging
 from typing import Any, Dict, List, Optional
 from cortexdb.engines import BaseEngine
@@ -24,15 +26,19 @@ except ImportError:
 
 # Single embedding pipeline instance — shared across all vector operations
 _embedding_pipeline: Optional[EmbeddingPipeline] = None
+_embedding_lock = __import__("threading").Lock()
 
 VECTOR_DIM = EmbeddingPipeline.EMBEDDING_DIM  # 384
 
 
 def _get_pipeline() -> EmbeddingPipeline:
-    """Get or create the shared EmbeddingPipeline instance."""
+    """Get or create the shared EmbeddingPipeline instance (thread-safe)."""
     global _embedding_pipeline
-    if _embedding_pipeline is None:
-        _embedding_pipeline = EmbeddingPipeline()
+    if _embedding_pipeline is not None:
+        return _embedding_pipeline
+    with _embedding_lock:
+        if _embedding_pipeline is None:
+            _embedding_pipeline = EmbeddingPipeline()
     return _embedding_pipeline
 
 
@@ -46,6 +52,7 @@ class VectorEngine(BaseEngine):
         self.url = config.get("url", "http://localhost:6333")
         self.client = None
         self._collections_created: set = set()
+        self._collection_lock = asyncio.Lock()
         self._search_count = 0
         self._write_count = 0
 
@@ -81,27 +88,31 @@ class VectorEngine(BaseEngine):
         }
 
     async def _ensure_collection(self, collection: str):
-        """Create collection if it doesn't exist.
-
-        Uses a local cache but verifies with Qdrant on miss to handle
-        multi-instance deployments where another process may have created it.
-        """
+        """Create collection if it doesn't exist. Lock-protected for concurrency."""
         if collection in self._collections_created:
             return
-        try:
-            # Check if it actually exists in Qdrant (handles multi-instance)
-            existing = await self.client.get_collections()
-            existing_names = {c.name for c in existing.collections}
-            self._collections_created.update(existing_names)
-            if collection in existing_names:
+        async with self._collection_lock:
+            # Double-check after acquiring lock
+            if collection in self._collections_created:
                 return
-            await self.client.create_collection(
-                collection,
-                vectors_config=VectorParams(size=VECTOR_DIM, distance=Distance.COSINE)
-            )
-        except Exception:
-            pass  # May already exist from a concurrent create
-        self._collections_created.add(collection)
+            try:
+                existing = await self.client.get_collections()
+                existing_names = {c.name for c in existing.collections}
+                self._collections_created.update(existing_names)
+                if collection in existing_names:
+                    return
+                await self.client.create_collection(
+                    collection,
+                    vectors_config=VectorParams(size=VECTOR_DIM, distance=Distance.COSINE)
+                )
+                self._collections_created.add(collection)
+            except Exception as e:
+                # Only cache if error indicates "already exists"
+                err_str = str(e).lower()
+                if "already exists" in err_str or "conflict" in err_str:
+                    self._collections_created.add(collection)
+                else:
+                    logger.warning(f"Failed to create collection '{collection}': {e}")
 
     async def search_similar(self, collection: str, query_text: str,
                             threshold: float = 0.95, limit: int = 5,
@@ -149,15 +160,21 @@ class VectorEngine(BaseEngine):
         await self._ensure_collection(collection)
 
         qdrant_points = []
+        skipped = 0
         for p in points:
             if "vector" in p:
                 vec = p["vector"]
             elif "text" in p:
                 vec = embed_text(p["text"])
             else:
+                skipped += 1
+                logger.warning(f"upsert_vectors: point missing 'vector' and 'text', skipped. Keys: {list(p.keys())}")
                 continue
+            # Use canonical JSON for deterministic ID fallback
+            point_id = p.get("id") or hashlib.sha256(
+                json.dumps(p, sort_keys=True, default=str).encode()).hexdigest()[:32]
             qdrant_points.append(PointStruct(
-                id=p.get("id", hashlib.sha256(str(p).encode()).hexdigest()[:32]),
+                id=point_id,
                 vector=vec,
                 payload=p.get("payload", {}),
             ))

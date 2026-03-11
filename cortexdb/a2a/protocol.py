@@ -158,6 +158,25 @@ class A2AProtocol:
         except Exception as e:
             logger.warning(f"PG update task failed: {e}")
 
+    async def _pg_atomic_transition(self, task_id: str, from_status: str,
+                                     to_status: str) -> bool:
+        """Atomically transition a task's status in PG. Returns True if successful.
+
+        Uses WHERE status=$2 to ensure only one concurrent caller wins.
+        """
+        if not self._pool:
+            return True  # No PG, allow in-memory transition
+        try:
+            async with self._pool.acquire() as conn:
+                result = await conn.execute(
+                    """UPDATE a2a_tasks SET status=$2, updated_at=NOW()
+                       WHERE task_id=$1 AND status=$3""",
+                    task_id, to_status, from_status)
+                return result == "UPDATE 1"
+        except Exception as e:
+            logger.warning(f"PG atomic transition failed: {e}")
+            return False
+
     async def _redis_set_task(self, task: A2ATask):
         """Cache task in Redis."""
         if not self._redis:
@@ -272,9 +291,13 @@ class A2AProtocol:
     async def assign_task(self, task_id: str) -> Optional[A2ATask]:
         task = await self._load_task(task_id)
         if task and task.status == A2ATaskStatus.CREATED:
+            # Atomic PG transition to prevent double-assign
+            if not await self._pg_atomic_transition(
+                    task_id, A2ATaskStatus.CREATED.value, A2ATaskStatus.ASSIGNED.value):
+                return None
             task.status = A2ATaskStatus.ASSIGNED
             task.assigned_at = time.time()
-            await self._pg_update_task(task)
+            await self._pg_update_task(task)  # update remaining fields
             await self._redis_set_task(task)
             return task
         return None
@@ -282,6 +305,9 @@ class A2AProtocol:
     async def start_task(self, task_id: str) -> Optional[A2ATask]:
         task = await self._load_task(task_id)
         if task and task.status == A2ATaskStatus.ASSIGNED:
+            if not await self._pg_atomic_transition(
+                    task_id, A2ATaskStatus.ASSIGNED.value, A2ATaskStatus.RUNNING.value):
+                return None
             task.status = A2ATaskStatus.RUNNING
             await self._pg_update_task(task)
             await self._redis_set_task(task)
@@ -298,6 +324,10 @@ class A2AProtocol:
                 logger.warning(
                     f"A2A auth rejected: agent {agent_id} tried to complete "
                     f"task {task_id} owned by {task.target_agent_id}")
+                return None
+            # Atomic PG transition to prevent double-complete
+            if not await self._pg_atomic_transition(
+                    task_id, A2ATaskStatus.RUNNING.value, A2ATaskStatus.COMPLETED.value):
                 return None
             task.status = A2ATaskStatus.COMPLETED
             task.output_data = output_data
@@ -317,6 +347,10 @@ class A2AProtocol:
                 logger.warning(
                     f"A2A auth rejected: agent {agent_id} tried to fail "
                     f"task {task_id} owned by {task.target_agent_id}")
+                return None
+            # Atomic PG transition
+            if not await self._pg_atomic_transition(
+                    task_id, task.status.value, A2ATaskStatus.FAILED.value):
                 return None
             task.status = A2ATaskStatus.FAILED
             task.error = error
