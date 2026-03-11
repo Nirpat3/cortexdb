@@ -53,6 +53,6 @@ class MemoryEngine(BaseEngine):
 
     async def touch(self, key: str, extend_seconds: int = 3600):
         """Extend TTL - like Synaptic Plasticity strengthening a pathway"""
-        ttl = await self.client.ttl(key)
+        ttl = int(await self.client.ttl(key))
         if ttl > 0:
             await self.client.expire(key, ttl + extend_seconds)

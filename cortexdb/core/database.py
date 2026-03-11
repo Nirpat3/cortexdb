@@ -162,6 +162,7 @@ class ReadCascade:
         self._r1_hits = 0
         self._r2_hits = 0
         self._r3_hits = 0
+        self._audit_failures = 0
         # Request coalescing: prevents cache stampede when multiple concurrent
         # requests for the same query all miss R0-R2 and hit R3 (PostgreSQL).
         # Only one PG query is made; other callers await the same future.
@@ -320,6 +321,7 @@ class ReadCascade:
                             },
                         )
                     except Exception as exc:
+                        self._audit_failures += 1
                         logger.warning(f"Audit logging failed: {exc}")
 
                 asyncio.create_task(_audit_log())

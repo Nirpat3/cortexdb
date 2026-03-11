@@ -4,6 +4,7 @@ Onboarding -> Active -> Offboarding with full data isolation.
 """
 
 import hashlib
+import os
 import secrets
 import time
 import logging
@@ -44,6 +45,7 @@ class Tenant:
     plan: TenantPlan = TenantPlan.FREE
     status: TenantStatus = TenantStatus.ONBOARDING
     api_key_hash: str = ""
+    api_key_salt: str = ""
     config: Dict = field(default_factory=dict)
     rate_limits: Dict = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
@@ -83,7 +85,7 @@ class TenantManager:
 
         try:
             rows = await self.engines["relational"].execute(
-                "SELECT tenant_id, name, plan, status, api_key_hash, "
+                "SELECT tenant_id, name, plan, status, api_key_hash, api_key_salt, "
                 "config, rate_limits, metadata, "
                 "EXTRACT(EPOCH FROM created_at) AS created_epoch, "
                 "EXTRACT(EPOCH FROM activated_at) AS activated_epoch "
@@ -111,6 +113,7 @@ class TenantManager:
                     plan=plan,
                     status=status,
                     api_key_hash=row.get("api_key_hash", ""),
+                    api_key_salt=row.get("api_key_salt", ""),
                     config=config,
                     rate_limits=rate_limits,
                     created_at=float(row["created_epoch"]) if row.get("created_epoch") else time.time(),
@@ -126,8 +129,12 @@ class TenantManager:
             logger.error(f"Failed to load tenants from DB: {e}")
 
     @staticmethod
-    def _hash_api_key(api_key: str) -> str:
-        return hashlib.sha256(api_key.encode()).hexdigest()
+    def _hash_api_key(api_key: str, salt: str = "") -> str:
+        return hashlib.sha256((salt + api_key).encode()).hexdigest()
+
+    @staticmethod
+    def _generate_salt() -> str:
+        return os.urandom(16).hex()
 
     @staticmethod
     def _generate_api_key() -> str:
@@ -141,11 +148,13 @@ class TenantManager:
             raise ValueError(f"Tenant {tenant_id} already exists")
 
         api_key = self._generate_api_key()
-        api_key_hash = self._hash_api_key(api_key)
+        api_key_salt = self._generate_salt()
+        api_key_hash = self._hash_api_key(api_key, api_key_salt)
 
         tenant = Tenant(
             tenant_id=tenant_id, name=name, plan=plan,
             api_key_hash=api_key_hash,
+            api_key_salt=api_key_salt,
             config=config or {},
             rate_limits=PLAN_RATE_LIMITS.get(plan, {}),
         )
@@ -156,10 +165,10 @@ class TenantManager:
         if "relational" in self.engines:
             try:
                 await self.engines["relational"].execute(
-                    "INSERT INTO tenants (tenant_id, name, plan, status, api_key_hash, config) "
-                    "VALUES ($1, $2, $3, $4, $5, $6)",
+                    "INSERT INTO tenants (tenant_id, name, plan, status, api_key_hash, api_key_salt, config) "
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7)",
                     [tenant_id, name, plan.value, "onboarding", api_key_hash,
-                     json_dumps(config or {})])
+                     api_key_salt, json_dumps(config or {})])
             except Exception as e:
                 logger.error(f"Failed to persist tenant to DB: {e}")
                 raise
@@ -298,12 +307,14 @@ class TenantManager:
         return purged
 
     def resolve_tenant(self, api_key: str) -> Optional[Tenant]:
-        """Resolve API key to tenant. O(1) lookup."""
-        key_hash = self._hash_api_key(api_key)
-        tenant_id = self._api_key_index.get(key_hash)
-        if not tenant_id:
-            return None
-        return self._tenants.get(tenant_id)
+        """Resolve API key to tenant. Checks salted hash for each tenant."""
+        for tenant in self._tenants.values():
+            if not tenant.api_key_hash:
+                continue
+            key_hash = self._hash_api_key(api_key, tenant.api_key_salt)
+            if key_hash == tenant.api_key_hash:
+                return tenant
+        return None
 
     def get_tenant(self, tenant_id: str) -> Optional[Tenant]:
         return self._tenants.get(tenant_id)

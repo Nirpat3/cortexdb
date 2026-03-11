@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS tenants (
     plan VARCHAR(20) DEFAULT 'free' CHECK (plan IN ('free','growth','enterprise','custom')),
     status VARCHAR(20) DEFAULT 'onboarding' CHECK (status IN ('onboarding','active','suspended','offboarding','purged')),
     api_key_hash VARCHAR(64) UNIQUE,
+    api_key_salt VARCHAR(32) DEFAULT '',
     config JSONB DEFAULT '{}',
     rate_limits JSONB DEFAULT '{}',
     metadata JSONB DEFAULT '{}',

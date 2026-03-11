@@ -348,8 +348,19 @@ class ChunkingPipeline:
         )]
 
     def _estimate_tokens(self, text: str) -> int:
-        """Approximate token count (~4 chars per token for English)."""
-        return len(text) // 4
+        """Approximate token count (~4 chars per token for English).
+
+        CJK characters (Chinese, Japanese, Korean) are typically 1 token each,
+        so they are counted separately from Latin text which averages ~4 chars/token.
+        """
+        cjk_count = sum(
+            1 for ch in text
+            if '\u4e00' <= ch <= '\u9fff'    # CJK Unified Ideographs
+            or '\u3040' <= ch <= '\u309f'     # Hiragana
+            or '\u30a0' <= ch <= '\u30ff'     # Katakana
+        )
+        non_cjk_len = len(text) - cjk_count
+        return cjk_count + non_cjk_len // 4
 
     def _generate_chunk_id(self, doc_id: str, chunk_index: int) -> str:
         """Deterministic chunk ID from doc_id + index (128 bits / 32 hex chars)."""

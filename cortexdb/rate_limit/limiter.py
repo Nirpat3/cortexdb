@@ -138,10 +138,10 @@ class RateLimiter:
             return self._check_window(key, limit, window_seconds, time.time())
 
         try:
-            count = await self.memory_engine.incr(f"rate:{key}")
+            count = int(await self.memory_engine.incr(f"rate:{key}"))
             if count == 1:
                 await self.memory_engine.expire(f"rate:{key}", window_seconds)
-            ttl = await self.memory_engine.ttl(f"rate:{key}")
+            ttl = int(await self.memory_engine.ttl(f"rate:{key}"))
             return RateLimitResult(
                 allowed=count <= limit, limit=limit,
                 remaining=max(0, limit - count),

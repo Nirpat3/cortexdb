@@ -68,6 +68,14 @@ def _task_to_redis_dict(task: A2ATask) -> Dict:
 
 def _task_from_dict(d: Dict) -> A2ATask:
     """Deserialize a dict (from Redis or PG) back into an A2ATask."""
+    # Validate status against known enum values; default to CREATED if unknown
+    raw_status = d.get("status", "created")
+    try:
+        status = A2ATaskStatus(raw_status)
+    except ValueError:
+        logger.warning("Unknown A2A task status '%s' for task_id=%s, defaulting to CREATED",
+                       raw_status, d.get("task_id"))
+        status = A2ATaskStatus.CREATED
     return A2ATask(
         task_id=d["task_id"],
         source_agent_id=d.get("source_agent_id") or d.get("requester_agent", ""),
@@ -75,7 +83,7 @@ def _task_from_dict(d: Dict) -> A2ATask:
         skill_requested=d.get("skill_requested") or d.get("task_type", ""),
         input_data=d.get("input_data") if isinstance(d.get("input_data"), dict) else {},
         output_data=d.get("output_data") if isinstance(d.get("output_data"), dict) else None,
-        status=A2ATaskStatus(d["status"]),
+        status=status,
         priority=int(d.get("priority", 3)),
         tenant_id=d.get("tenant_id"),
         created_at=float(d.get("created_at", 0)),

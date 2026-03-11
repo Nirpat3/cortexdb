@@ -15,6 +15,8 @@ import secrets
 import hashlib
 from fastapi import FastAPI, HTTPException, Request, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 from pydantic import BaseModel, Field
 from typing import Any, Dict, Optional, List
 from contextlib import asynccontextmanager
@@ -47,7 +49,23 @@ from cortexdb.compliance.framework import ComplianceFramework, Framework
 from cortexdb.compliance.encryption import FieldEncryption, KeyManager
 from cortexdb.compliance.audit import ComplianceAudit, AuditEventType
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+if os.getenv("CORTEX_LOG_JSON", "").lower() in ("1", "true", "yes"):
+    import json as _json_log
+
+    class _JsonFormatter(logging.Formatter):
+        def format(self, record):
+            return _json_log.dumps({
+                "ts": self.formatTime(record),
+                "level": record.levelname,
+                "logger": record.name,
+                "msg": record.getMessage(),
+            })
+
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(_JsonFormatter())
+    logging.basicConfig(level=logging.INFO, handlers=[_handler])
+else:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("cortexdb.server")
 
 db: Optional[CortexDB] = None
@@ -195,6 +213,19 @@ _cors_origins = os.environ.get("CORTEX_CORS_ORIGINS", "http://localhost:3000,htt
 app.add_middleware(CORSMiddleware, allow_origins=_cors_origins,
                    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
                    allow_headers=["Authorization", "Content-Type", "X-Tenant-Key", "X-Request-ID"])
+
+MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
+class _RequestSizeLimitMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        content_length = request.headers.get("content-length")
+        if content_length and int(content_length) > MAX_REQUEST_BODY_BYTES:
+            return Response("Request body too large", status_code=413)
+        return await call_next(request)
+
+
+app.add_middleware(_RequestSizeLimitMiddleware)
 # Middleware uses module-level globals so lifespan() can inject dependencies.
 # Starlette middleware instances are immutable after add_middleware(), so we
 # use a lambda-style wrapper that reads from the globals at request time.
@@ -496,12 +527,22 @@ async def set_cache_config(request: Request):
     collection = body.get("collection")
     if not collection or not isinstance(collection, str):
         raise HTTPException(400, "collection (string) is required")
+    import math
+    ttl_val = int(body.get("ttl_seconds", 3600))
+    max_ent_val = int(body.get("max_entries", 10000))
+    threshold_val = float(body.get("threshold", 0.88))
+    if not math.isfinite(threshold_val) or threshold_val < 0:
+        raise HTTPException(400, "threshold must be a finite non-negative number")
+    if not math.isfinite(ttl_val) or ttl_val < 0:
+        ttl_val = 3600
+    if not math.isfinite(max_ent_val) or max_ent_val < 0:
+        max_ent_val = 10000
     config = CollectionCacheConfig(
-        threshold=float(body.get("threshold", 0.88)),
+        threshold=threshold_val,
         r2_enabled=bool(body.get("r2_enabled", True)),
-        ttl_seconds=int(body.get("ttl_seconds", 3600)),
+        ttl_seconds=max(0, ttl_val),
         negative_cache=bool(body.get("negative_cache", False)),
-        max_entries=int(body.get("max_entries", 10000)),
+        max_entries=max(0, max_ent_val),
     )
     db.read_cascade.cache_config.set_collection_config(collection, config)
     return {
@@ -690,6 +731,7 @@ async def health_history(tier: Optional[int] = None):
 
 @app.get("/v1/ledger/recent")
 async def recent_ledger(limit: int = 20):
+    limit = max(1, min(limit, 500))
     if "immutable" in db.engines:
         entries = db.engines["immutable"]._chain[-limit:]
         return {"entries": entries, "total": len(db.engines["immutable"]._chain)}
@@ -934,7 +976,7 @@ async def sharding_rebalance():
 @app.get("/v1/admin/sharding/stats")
 async def sharding_stats():
     """Get shard distribution statistics."""
-    return await shard_mgr.get_shard_stats() if shard_mgr else shard_mgr.get_stats()
+    return await shard_mgr.get_shard_stats() if shard_mgr else {}
 
 @app.get("/v1/admin/sharding/tenant-placement/{tenant_id}")
 async def sharding_tenant_placement(tenant_id: str):
@@ -1001,7 +1043,7 @@ async def index_tune_vector(collection: Optional[str] = None):
     """Auto-tune HNSW/IVF vector index parameters."""
     return await ai_index.tune_vector_indexes(collection) if ai_index else {}
 
-@app.get("/v1/admin/indexes/garbage-collect")
+@app.post("/v1/admin/indexes/garbage-collect")
 async def index_gc():
     """Find unused and duplicate indexes."""
     return await ai_index.garbage_collect() if ai_index else {}
@@ -1170,7 +1212,7 @@ async def rag_hybrid_search(request: Request, body: dict):
     results = await db.hybrid_search.search(
         query=body["query"],
         collection=body.get("collection", "documents"),
-        limit=body.get("limit", 10),
+        limit=max(1, min(int(body.get("limit", 10)), 500)),
         tenant_id=tid,
         rerank=body.get("rerank", True),
     )
@@ -1299,7 +1341,7 @@ async def rag_retrieve(request: Request, body: dict):
     result = await db.rag.retrieve_with_context(
         query=body["query"],
         collection=body.get("collection", "documents"),
-        limit=body.get("limit", 5),
+        limit=max(1, min(int(body.get("limit", 5)), 500)),
         max_tokens=body.get("max_tokens", 4000),
         tenant_id=tid,
         smart=body.get("smart", False))
@@ -1317,7 +1359,7 @@ async def rag_smart_retrieve(request: Request, body: dict):
     result = await db.rag.smart_retrieve(
         query=body["query"],
         collection=body.get("collection", "documents"),
-        limit=body.get("limit", 5),
+        limit=max(1, min(int(body.get("limit", 5)), 500)),
         threshold=body.get("threshold", 0.75),
         tenant_id=tid,
         use_feedback_loop=body.get("feedback_loop", True))

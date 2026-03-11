@@ -41,6 +41,8 @@ class OutboxWorker:
         self._failed_total = 0
         self._latency_sum = 0.0
         self._latency_count = 0
+        self._metrics_cache: Optional[Dict] = None
+        self._metrics_cache_ts: float = 0.0
 
     async def start(self):
         """Start the background polling and cleanup tasks."""
@@ -241,8 +243,15 @@ class OutboxWorker:
             """, str(self.CLEANUP_AGE_HOURS))
             logger.debug(f"Outbox cleanup: {deleted}")
 
+    METRICS_CACHE_TTL = 5.0  # seconds
+
     async def get_metrics(self) -> Dict:
-        """Return current outbox metrics by querying the table."""
+        """Return current outbox metrics by querying the table.
+        Results are cached for METRICS_CACHE_TTL seconds to avoid hammering PG."""
+        now = time.monotonic()
+        if self._metrics_cache is not None and (now - self._metrics_cache_ts) < self.METRICS_CACHE_TTL:
+            return self._metrics_cache
+
         async with self.pool.acquire() as conn:
             rows = await conn.fetch("""
                 SELECT status, COUNT(*) as cnt
@@ -257,7 +266,7 @@ class OutboxWorker:
             else 0.0
         )
 
-        return {
+        result = {
             "pending_count": counts.get("pending", 0),
             "processing_count": counts.get("processing", 0),
             "completed_count": counts.get("completed", 0),
@@ -267,6 +276,9 @@ class OutboxWorker:
             "failed_total": self._failed_total,
             "avg_latency_ms": round(avg_latency * 1000, 3),
         }
+        self._metrics_cache = result
+        self._metrics_cache_ts = now
+        return result
 
     async def wait_for_drain(self, timeout: float = 30.0):
         """Wait until all pending/failed entries are processed or timeout."""

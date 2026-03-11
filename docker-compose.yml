@@ -105,7 +105,7 @@ services:
     image: citusdata/citus:12.1
     container_name: cortex-relational
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     environment:
       - POSTGRES_USER=cortex
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-cortex_secret}
@@ -216,7 +216,7 @@ services:
     image: redis:7-alpine
     container_name: cortex-memory
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     command: >
       redis-server
       --maxmemory 512mb
@@ -229,7 +229,7 @@ services:
     volumes:
       - cortex-redis-data:/data
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli -a $${REDIS_PASSWORD:-cortex_redis_secret} ping"]
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a $${REDIS_PASSWORD:-cortex_redis_secret} ping"]
       interval: 5s
       timeout: 3s
       retries: 3
@@ -253,7 +253,7 @@ services:
     image: redis:7-alpine
     container_name: cortex-stream
     ports:
-      - "6380:6380"
+      - "127.0.0.1:6380:6380"
     command: >
       redis-server
       --port 6380
@@ -265,7 +265,7 @@ services:
     volumes:
       - cortex-stream-data:/data
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli -p 6380 -a $${STREAM_PASSWORD:-cortex_stream_secret} ping"]
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -p 6380 -a $${STREAM_PASSWORD:-cortex_stream_secret} ping"]
       interval: 5s
       timeout: 3s
       retries: 3
@@ -286,8 +286,8 @@ services:
     image: qdrant/qdrant:latest
     container_name: cortex-vector
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
     volumes:
       - cortex-vector-data:/qdrant/storage
     environment:

@@ -53,8 +53,19 @@ class ChildChunk:
 # ---------------------------------------------------------------------------
 
 def _estimate_tokens(text: str) -> int:
-    """Approximate token count (~4 chars per token for English)."""
-    return len(text) // 4
+    """Approximate token count (~4 chars per token for English).
+
+    CJK characters (Chinese, Japanese, Korean) are typically 1 token each,
+    so they are counted separately from Latin text which averages ~4 chars/token.
+    """
+    cjk_count = sum(
+        1 for ch in text
+        if '\u4e00' <= ch <= '\u9fff'    # CJK Unified Ideographs
+        or '\u3040' <= ch <= '\u309f'     # Hiragana
+        or '\u30a0' <= ch <= '\u30ff'     # Katakana
+    )
+    non_cjk_len = len(text) - cjk_count
+    return cjk_count + non_cjk_len // 4
 
 
 def _generate_id(doc_id: str, level: str, index: int) -> str:
@@ -223,7 +234,8 @@ class HierarchicalChunker:
     ):
         self.parent_size = parent_size
         self.child_size = child_size
-        self.child_overlap = child_overlap
+        # Ensure overlap is strictly less than child_size to prevent zero/negative step
+        self.child_overlap = min(child_overlap, child_size - 1)
         self.min_child_size = min_child_size
         self._boundary_detector = SmartBoundaryDetector()
 
