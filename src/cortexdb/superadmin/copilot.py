@@ -127,43 +127,9 @@ class CopilotManager:
             return False
 
     def _init_db(self) -> None:
-        """Create copilot tables if they do not exist."""
-        conn = self._get_connection()
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS copilot_sessions (
-                id          TEXT PRIMARY KEY,
-                user_id     TEXT NOT NULL DEFAULT 'superadmin',
-                title       TEXT,
-                messages    TEXT NOT NULL DEFAULT '[]',
-                created_at  TEXT NOT NULL,
-                updated_at  TEXT NOT NULL
-            )
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_copilot_sessions_user
-            ON copilot_sessions(user_id)
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_copilot_sessions_updated
-            ON copilot_sessions(updated_at DESC)
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS copilot_suggestions (
-                id              TEXT PRIMARY KEY,
-                session_id      TEXT,
-                suggestion_type TEXT NOT NULL,
-                content         TEXT NOT NULL DEFAULT '{}',
-                applied         INTEGER NOT NULL DEFAULT 0,
-                created_at      TEXT NOT NULL,
-                FOREIGN KEY (session_id) REFERENCES copilot_sessions(id) ON DELETE CASCADE
-            )
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_copilot_suggestions_session
-            ON copilot_suggestions(session_id)
-        """)
-        conn.commit()
-        logger.info("Copilot tables initialized")
+        """Ensure DB connection is ready. Tables are managed by migrations (v5)."""
+        self._get_connection()
+        logger.info("Copilot tables initialized (managed by migrations)")
 
     # ── Session management ────────────────────────────────────────────
 

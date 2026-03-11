@@ -84,31 +84,9 @@ class CampaignPlanner:
         self._init_db()
 
     def _init_db(self) -> None:
-        conn = self._persistence.conn
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS sentinel_campaigns (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                campaign_id TEXT NOT NULL UNIQUE,
-                name TEXT NOT NULL,
-                description TEXT DEFAULT '',
-                status TEXT NOT NULL DEFAULT 'draft'
-                    CHECK(status IN ('draft', 'planned', 'running', 'completed', 'cancelled', 'failed')),
-                target_categories TEXT NOT NULL DEFAULT '[]',
-                target_endpoints TEXT NOT NULL DEFAULT '[]',
-                schedule TEXT NOT NULL DEFAULT '{}',
-                config TEXT NOT NULL DEFAULT '{}',
-                created_at REAL NOT NULL,
-                started_at REAL,
-                completed_at REAL,
-                created_by TEXT DEFAULT 'system'
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_sentinel_campaigns_status
-                ON sentinel_campaigns(status);
-            CREATE INDEX IF NOT EXISTS idx_sentinel_campaigns_created
-                ON sentinel_campaigns(created_at);
-        """)
-        conn.commit()
+        # Table 'sentinel_campaigns' is managed by the SQLite migration system
+        # (see migrations.py v6). No-op.
+        pass
 
     # ── Helpers ─────────────────────────────────────────────────────────────
 

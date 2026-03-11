@@ -36,22 +36,9 @@ class SimulationEngine:
         self._ensure_tables()
 
     def _ensure_tables(self) -> None:
-        c = self._persistence.conn.cursor()
-        c.execute(
-            """CREATE TABLE IF NOT EXISTS simulations (
-                id TEXT PRIMARY KEY, name TEXT NOT NULL, sim_type TEXT NOT NULL,
-                status TEXT DEFAULT 'created', config TEXT DEFAULT '{}',
-                results TEXT DEFAULT '[]', created_at TEXT DEFAULT (datetime('now')),
-                completed_at TEXT)"""
-        )
-        c.execute(
-            """CREATE TABLE IF NOT EXISTS sim_agent_snapshots (
-                id TEXT PRIMARY KEY, sim_id TEXT NOT NULL, agent_id TEXT NOT NULL,
-                agent_state TEXT NOT NULL, skill_profile TEXT DEFAULT '{}',
-                created_at TEXT DEFAULT (datetime('now')),
-                FOREIGN KEY (sim_id) REFERENCES simulations(id))"""
-        )
-        self._persistence.conn.commit()
+        # Tables 'simulations' and 'sim_agent_snapshots' are managed by the
+        # SQLite migration system (see migrations.py v4). No-op.
+        pass
 
     def _sim_id(self) -> str:
         return f"SIM-{uuid.uuid4().hex[:8]}"

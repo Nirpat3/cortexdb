@@ -221,50 +221,9 @@ class SecurityAnalyzer:
         self._init_db()
 
     def _init_db(self) -> None:
-        conn = self._persistence.conn
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS sentinel_posture (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                snapshot_id TEXT NOT NULL UNIQUE,
-                overall_score REAL NOT NULL,
-                category_scores TEXT NOT NULL DEFAULT '{}',
-                total_tests INTEGER NOT NULL DEFAULT 0,
-                total_pass INTEGER NOT NULL DEFAULT 0,
-                total_fail INTEGER NOT NULL DEFAULT 0,
-                critical_findings INTEGER NOT NULL DEFAULT 0,
-                high_findings INTEGER NOT NULL DEFAULT 0,
-                medium_findings INTEGER NOT NULL DEFAULT 0,
-                low_findings INTEGER NOT NULL DEFAULT 0,
-                trend TEXT NOT NULL DEFAULT 'stable',
-                created_at REAL NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS sentinel_remediation (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                plan_id TEXT NOT NULL UNIQUE,
-                finding_id TEXT DEFAULT '',
-                title TEXT NOT NULL,
-                description TEXT DEFAULT '',
-                priority TEXT NOT NULL DEFAULT 'medium'
-                    CHECK(priority IN ('critical', 'high', 'medium', 'low')),
-                effort_estimate TEXT NOT NULL DEFAULT 'medium'
-                    CHECK(effort_estimate IN ('low', 'medium', 'high')),
-                steps TEXT NOT NULL DEFAULT '[]',
-                status TEXT NOT NULL DEFAULT 'open'
-                    CHECK(status IN ('open', 'in_progress', 'completed', 'dismissed')),
-                assigned_to TEXT DEFAULT '',
-                created_at REAL NOT NULL,
-                completed_at REAL
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_sentinel_posture_created
-                ON sentinel_posture(created_at);
-            CREATE INDEX IF NOT EXISTS idx_sentinel_remediation_status
-                ON sentinel_remediation(status);
-            CREATE INDEX IF NOT EXISTS idx_sentinel_remediation_priority
-                ON sentinel_remediation(priority);
-        """)
-        conn.commit()
+        # Tables 'sentinel_posture' and 'sentinel_remediation' are managed by
+        # the SQLite migration system (see migrations.py v6). No-op.
+        pass
 
     # ── Posture helpers ────────────────────────────────────────────────────
 

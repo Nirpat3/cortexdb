@@ -195,42 +195,8 @@ class CustomDashboardManager:
     # ── Schema ──────────────────────────────────────────────────────────────
 
     def _init_db(self) -> None:
-        conn = self._persistence.conn
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS custom_dashboards (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                description TEXT DEFAULT '',
-                layout TEXT NOT NULL DEFAULT '{}',
-                widgets TEXT NOT NULL DEFAULT '[]',
-                theme TEXT NOT NULL DEFAULT '{}',
-                owner TEXT NOT NULL DEFAULT 'system',
-                shared_with TEXT NOT NULL DEFAULT '[]',
-                is_public INTEGER NOT NULL DEFAULT 0,
-                refresh_interval INTEGER NOT NULL DEFAULT 30,
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS dashboard_widgets (
-                id TEXT PRIMARY KEY,
-                dashboard_id TEXT NOT NULL,
-                widget_type TEXT NOT NULL,
-                title TEXT NOT NULL,
-                data_source TEXT NOT NULL DEFAULT '',
-                query TEXT NOT NULL DEFAULT '',
-                config TEXT NOT NULL DEFAULT '{}',
-                position TEXT NOT NULL DEFAULT '{}',
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL,
-                FOREIGN KEY (dashboard_id) REFERENCES custom_dashboards(id) ON DELETE CASCADE
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_dashboard_widgets_did ON dashboard_widgets(dashboard_id);
-            CREATE INDEX IF NOT EXISTS idx_custom_dashboards_owner ON custom_dashboards(owner);
-            CREATE INDEX IF NOT EXISTS idx_custom_dashboards_public ON custom_dashboards(is_public);
-        """)
-        conn.commit()
+        # Tables 'custom_dashboards' and 'dashboard_widgets' are managed by
+        # the SQLite migration system (see migrations.py v5).
         self._seed_defaults()
 
     def _seed_defaults(self) -> None:

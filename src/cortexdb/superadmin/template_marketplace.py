@@ -424,43 +424,9 @@ class TemplateMarketplace:
             return False
 
     def _init_db(self) -> None:
-        """Create community_templates table and seed defaults."""
+        """Seed defaults. Table 'community_templates' is managed by the SQLite
+        migration system (see migrations.py v5)."""
         conn = self._get_connection()
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS community_templates (
-                id              TEXT PRIMARY KEY,
-                name            TEXT NOT NULL,
-                description     TEXT NOT NULL DEFAULT '',
-                author          TEXT NOT NULL DEFAULT 'Anonymous',
-                category        TEXT NOT NULL DEFAULT 'general',
-                tags            TEXT NOT NULL DEFAULT '[]',
-                template_data   TEXT NOT NULL DEFAULT '{}',
-                version         TEXT NOT NULL DEFAULT '1.0.0',
-                downloads       INTEGER NOT NULL DEFAULT 0,
-                rating          REAL NOT NULL DEFAULT 0.0,
-                ratings_count   INTEGER NOT NULL DEFAULT 0,
-                featured        INTEGER NOT NULL DEFAULT 0,
-                published_at    TEXT NOT NULL,
-                updated_at      TEXT NOT NULL
-            )
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_community_templates_category
-            ON community_templates(category)
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_community_templates_downloads
-            ON community_templates(downloads DESC)
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_community_templates_rating
-            ON community_templates(rating DESC)
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_community_templates_featured
-            ON community_templates(featured)
-        """)
-        conn.commit()
 
         # Seed defaults if table is empty
         row = conn.execute("SELECT COUNT(*) AS cnt FROM community_templates").fetchone()

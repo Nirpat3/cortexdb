@@ -30,45 +30,9 @@ class AttackKnowledgeBase:
     # ── Schema ──────────────────────────────────────────────────────────────
 
     def _init_db(self) -> None:
-        conn = self._persistence.conn
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS sentinel_kb (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                attack_id TEXT UNIQUE,
-                category TEXT,
-                name TEXT,
-                description TEXT,
-                severity TEXT,
-                framework TEXT,
-                framework_id TEXT,
-                payloads TEXT,
-                indicators TEXT,
-                remediation TEXT,
-                enabled INTEGER DEFAULT 1,
-                created_at TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS sentinel_threat_intel (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                intel_id TEXT UNIQUE,
-                source TEXT,
-                cve_id TEXT,
-                title TEXT,
-                description TEXT,
-                severity TEXT,
-                affected_component TEXT,
-                applicable INTEGER DEFAULT 0,
-                mitigation TEXT,
-                created_at TEXT
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_sentinel_kb_category ON sentinel_kb(category);
-            CREATE INDEX IF NOT EXISTS idx_sentinel_kb_severity ON sentinel_kb(severity);
-            CREATE INDEX IF NOT EXISTS idx_sentinel_kb_enabled ON sentinel_kb(enabled);
-            CREATE INDEX IF NOT EXISTS idx_sentinel_ti_severity ON sentinel_threat_intel(severity);
-            CREATE INDEX IF NOT EXISTS idx_sentinel_ti_component ON sentinel_threat_intel(affected_component);
-        """)
-        conn.commit()
+        # Tables 'sentinel_kb' and 'sentinel_threat_intel' are managed by the
+        # SQLite migration system (see migrations.py v6). No-op.
+        pass
 
     # ── Helpers ─────────────────────────────────────────────────────────────
 

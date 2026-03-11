@@ -65,55 +65,9 @@ class ZapierConnector:
     # ── Schema ────────────────────────────────────────────────────────
 
     def _init_db(self) -> None:
-        """Create webhook_endpoints and webhook_deliveries tables if they don't exist."""
+        """Ensure data directory exists. Tables 'webhook_endpoints' and 'webhook_deliveries'
+        are managed by the SQLite migration system (see migrations.py v5)."""
         os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
-        conn = sqlite3.connect(self._db_path, timeout=10)
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA foreign_keys=ON")
-            conn.executescript("""
-                CREATE TABLE IF NOT EXISTS webhook_endpoints (
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    description TEXT DEFAULT '',
-                    url TEXT NOT NULL,
-                    secret TEXT,
-                    event_types TEXT NOT NULL DEFAULT '[]',
-                    headers TEXT DEFAULT '{}',
-                    enabled INTEGER DEFAULT 1,
-                    retry_count INTEGER DEFAULT 3,
-                    last_triggered TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_webhook_endpoints_enabled
-                    ON webhook_endpoints(enabled);
-
-                CREATE TABLE IF NOT EXISTS webhook_deliveries (
-                    id TEXT PRIMARY KEY,
-                    endpoint_id TEXT NOT NULL,
-                    event_type TEXT NOT NULL,
-                    payload TEXT NOT NULL DEFAULT '{}',
-                    status TEXT NOT NULL DEFAULT 'pending'
-                        CHECK(status IN ('pending', 'delivered', 'failed')),
-                    response_code INTEGER,
-                    response_body TEXT,
-                    attempts INTEGER DEFAULT 0,
-                    created_at TEXT NOT NULL,
-                    FOREIGN KEY (endpoint_id) REFERENCES webhook_endpoints(id) ON DELETE CASCADE
-                );
-                CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_endpoint
-                    ON webhook_deliveries(endpoint_id);
-                CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_status
-                    ON webhook_deliveries(status);
-                CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_event
-                    ON webhook_deliveries(event_type);
-                CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_created
-                    ON webhook_deliveries(created_at);
-            """)
-            conn.commit()
-        finally:
-            conn.close()
 
     # ── Helpers ────────────────────────────────────────────────────────
 

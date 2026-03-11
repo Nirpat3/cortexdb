@@ -171,49 +171,9 @@ class VoiceInterface:
     # ── Schema ────────────────────────────────────────────────────────
 
     def _init_db(self) -> None:
-        """Create voice_sessions and voice_commands tables if they don't exist."""
+        """Ensure data directory exists. Tables 'voice_sessions' and 'voice_commands'
+        are managed by the SQLite migration system (see migrations.py v5)."""
         os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
-        conn = sqlite3.connect(self._db_path, timeout=10)
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA foreign_keys=ON")
-            conn.executescript("""
-                CREATE TABLE IF NOT EXISTS voice_sessions (
-                    id TEXT PRIMARY KEY,
-                    user_id TEXT NOT NULL DEFAULT 'superadmin',
-                    status TEXT NOT NULL DEFAULT 'active',
-                    config TEXT DEFAULT '{}',
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_voice_sessions_user
-                    ON voice_sessions(user_id);
-                CREATE INDEX IF NOT EXISTS idx_voice_sessions_status
-                    ON voice_sessions(status);
-
-                CREATE TABLE IF NOT EXISTS voice_commands (
-                    id TEXT PRIMARY KEY,
-                    session_id TEXT NOT NULL,
-                    transcript TEXT NOT NULL,
-                    intent TEXT,
-                    entities TEXT DEFAULT '{}',
-                    response TEXT,
-                    audio_url TEXT,
-                    confidence REAL DEFAULT 0.0,
-                    processing_time_ms INTEGER DEFAULT 0,
-                    created_at TEXT NOT NULL,
-                    FOREIGN KEY (session_id) REFERENCES voice_sessions(id) ON DELETE CASCADE
-                );
-                CREATE INDEX IF NOT EXISTS idx_voice_commands_session
-                    ON voice_commands(session_id);
-                CREATE INDEX IF NOT EXISTS idx_voice_commands_intent
-                    ON voice_commands(intent);
-                CREATE INDEX IF NOT EXISTS idx_voice_commands_created
-                    ON voice_commands(created_at);
-            """)
-            conn.commit()
-        finally:
-            conn.close()
 
     # ── Helpers ────────────────────────────────────────────────────────
 

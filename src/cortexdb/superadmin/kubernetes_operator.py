@@ -38,52 +38,9 @@ class KubernetesOperator:
     # ── Schema ──────────────────────────────────────────────────────────
 
     def _init_db(self) -> None:
-        """Create k8s_clusters, k8s_deployments, and k8s_operations tables."""
-        conn = self._store.conn
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS k8s_clusters (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                namespace TEXT NOT NULL DEFAULT 'cortexdb',
-                kubeconfig_ref TEXT,
-                status TEXT NOT NULL DEFAULT 'active',
-                node_count INTEGER NOT NULL DEFAULT 0,
-                pod_count INTEGER NOT NULL DEFAULT 0,
-                config TEXT NOT NULL DEFAULT '{}',
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_k8s_clusters_status ON k8s_clusters(status);
-
-            CREATE TABLE IF NOT EXISTS k8s_deployments (
-                id TEXT PRIMARY KEY,
-                cluster_id TEXT NOT NULL,
-                name TEXT NOT NULL,
-                replicas INTEGER NOT NULL DEFAULT 1,
-                image TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending',
-                config TEXT NOT NULL DEFAULT '{}',
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL,
-                FOREIGN KEY (cluster_id) REFERENCES k8s_clusters(id) ON DELETE CASCADE
-            );
-            CREATE INDEX IF NOT EXISTS idx_k8s_deploy_cluster ON k8s_deployments(cluster_id);
-
-            CREATE TABLE IF NOT EXISTS k8s_operations (
-                id TEXT PRIMARY KEY,
-                cluster_id TEXT NOT NULL,
-                operation_type TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending',
-                details TEXT NOT NULL DEFAULT '{}',
-                started_at REAL NOT NULL,
-                completed_at REAL,
-                FOREIGN KEY (cluster_id) REFERENCES k8s_clusters(id) ON DELETE CASCADE
-            );
-            CREATE INDEX IF NOT EXISTS idx_k8s_ops_cluster ON k8s_operations(cluster_id);
-            CREATE INDEX IF NOT EXISTS idx_k8s_ops_type ON k8s_operations(operation_type);
-        """)
-        conn.commit()
-        logger.info("Kubernetes operator tables initialized")
+        # Tables 'k8s_clusters', 'k8s_deployments', and 'k8s_operations' are
+        # managed by the SQLite migration system (see migrations.py v5).
+        logger.info("Kubernetes operator tables initialized (managed by migrations)")
 
     # ── Helpers ─────────────────────────────────────────────────────────
 

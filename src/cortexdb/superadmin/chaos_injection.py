@@ -44,19 +44,9 @@ class ChaosInjector:
         self._ensure_table()
 
     def _ensure_table(self) -> None:
-        self._persistence.conn.execute(
-            """CREATE TABLE IF NOT EXISTS chaos_events (
-                id TEXT PRIMARY KEY,
-                sim_id TEXT NOT NULL,
-                event_type TEXT NOT NULL,
-                target TEXT NOT NULL,
-                config TEXT NOT NULL DEFAULT '{}',
-                status TEXT NOT NULL DEFAULT 'injected',
-                injected_at REAL NOT NULL,
-                resolved_at REAL
-            )"""
-        )
-        self._persistence.conn.commit()
+        # Table 'chaos_events' is managed by the SQLite migration system
+        # (see migrations.py v4). No-op.
+        pass
 
     def inject_failure(self, sim_id: str, event_type: str, target: str, config: Optional[Dict] = None) -> dict:
         if event_type not in CHAOS_TYPES:

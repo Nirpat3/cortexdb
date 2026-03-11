@@ -68,44 +68,9 @@ class TeamsIntegration:
     # ── Schema ────────────────────────────────────────────────────────
 
     def _init_db(self) -> None:
-        """Create teams_config and teams_messages tables if they don't exist."""
+        """Ensure data directory exists. Tables 'teams_config' and 'teams_messages'
+        are managed by the SQLite migration system (see migrations.py v5)."""
         os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
-        conn = sqlite3.connect(self._db_path, timeout=10)
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA foreign_keys=ON")
-            conn.executescript("""
-                CREATE TABLE IF NOT EXISTS teams_config (
-                    id TEXT PRIMARY KEY,
-                    tenant_id TEXT,
-                    webhook_url TEXT NOT NULL,
-                    bot_token TEXT,
-                    channel_mappings TEXT DEFAULT '{}',
-                    enabled INTEGER DEFAULT 1,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS teams_messages (
-                    id TEXT PRIMARY KEY,
-                    direction TEXT NOT NULL CHECK(direction IN ('inbound', 'outbound')),
-                    channel_id TEXT,
-                    agent_id TEXT,
-                    message TEXT NOT NULL,
-                    message_type TEXT DEFAULT 'text',
-                    status TEXT DEFAULT 'pending',
-                    created_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_teams_messages_direction
-                    ON teams_messages(direction);
-                CREATE INDEX IF NOT EXISTS idx_teams_messages_agent
-                    ON teams_messages(agent_id);
-                CREATE INDEX IF NOT EXISTS idx_teams_messages_created
-                    ON teams_messages(created_at);
-            """)
-            conn.commit()
-        finally:
-            conn.close()
 
     # ── Helpers ────────────────────────────────────────────────────────
 

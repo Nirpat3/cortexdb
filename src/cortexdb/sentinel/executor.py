@@ -116,58 +116,9 @@ class AttackExecutor:
     # ── Schema ────────────────────────────────────────────────────────────────
 
     def _init_db(self) -> None:
-        conn = self._persistence.conn
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS sentinel_runs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                run_id TEXT NOT NULL UNIQUE,
-                campaign_id TEXT,
-                status TEXT NOT NULL DEFAULT 'pending'
-                    CHECK(status IN ('pending','running','completed','failed','aborted')),
-                phase TEXT DEFAULT NULL,
-                total_tests INTEGER NOT NULL DEFAULT 0,
-                passed INTEGER NOT NULL DEFAULT 0,
-                failed INTEGER NOT NULL DEFAULT 0,
-                vulnerabilities_found INTEGER NOT NULL DEFAULT 0,
-                started_at REAL,
-                completed_at REAL,
-                summary TEXT DEFAULT '{}'
-            );
-
-            CREATE TABLE IF NOT EXISTS sentinel_findings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                finding_id TEXT NOT NULL UNIQUE,
-                run_id TEXT NOT NULL,
-                campaign_id TEXT,
-                attack_id TEXT,
-                category TEXT,
-                severity TEXT DEFAULT 'info'
-                    CHECK(severity IN ('critical','high','medium','low','info')),
-                endpoint TEXT,
-                method TEXT DEFAULT 'GET',
-                payload TEXT,
-                request_headers TEXT DEFAULT '{}',
-                response_status INTEGER,
-                response_body_snippet TEXT,
-                response_time_ms REAL,
-                vulnerable INTEGER NOT NULL DEFAULT 0,
-                evidence TEXT DEFAULT '{}',
-                remediation TEXT DEFAULT '',
-                status TEXT NOT NULL DEFAULT 'open'
-                    CHECK(status IN ('open','confirmed','false_positive','remediated','accepted')),
-                found_at REAL NOT NULL,
-                remediated_at REAL
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_sr_run_id ON sentinel_runs(run_id);
-            CREATE INDEX IF NOT EXISTS idx_sr_campaign ON sentinel_runs(campaign_id);
-            CREATE INDEX IF NOT EXISTS idx_sr_status ON sentinel_runs(status);
-            CREATE INDEX IF NOT EXISTS idx_sf_run_id ON sentinel_findings(run_id);
-            CREATE INDEX IF NOT EXISTS idx_sf_category ON sentinel_findings(category);
-            CREATE INDEX IF NOT EXISTS idx_sf_severity ON sentinel_findings(severity);
-            CREATE INDEX IF NOT EXISTS idx_sf_vulnerable ON sentinel_findings(vulnerable);
-        """)
-        conn.commit()
+        # Tables 'sentinel_runs' and 'sentinel_findings' are managed by the
+        # SQLite migration system (see migrations.py v6). No-op.
+        pass
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 

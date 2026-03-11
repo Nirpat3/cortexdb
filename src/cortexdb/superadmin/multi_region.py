@@ -62,75 +62,17 @@ class MultiRegionManager:
     # ── Schema & Seeds ──────────────────────────────────────────────────
 
     def _init_db(self) -> None:
-        """Create regions, replication_streams, replication_conflicts, and failover_log tables."""
+        """Seed default regions. Tables 'regions', 'replication_streams',
+        'replication_conflicts', and 'failover_log' are managed by the SQLite
+        migration system (see migrations.py v5)."""
         conn = self._store.conn
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS regions (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL UNIQUE,
-                display_name TEXT NOT NULL,
-                endpoint TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'standby',
-                is_primary INTEGER NOT NULL DEFAULT 0,
-                latency_ms INTEGER NOT NULL DEFAULT 0,
-                config TEXT NOT NULL DEFAULT '{}',
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_regions_status ON regions(status);
-            CREATE INDEX IF NOT EXISTS idx_regions_primary ON regions(is_primary);
-
-            CREATE TABLE IF NOT EXISTS replication_streams (
-                id TEXT PRIMARY KEY,
-                source_region TEXT NOT NULL,
-                target_region TEXT NOT NULL,
-                tables TEXT NOT NULL DEFAULT '["*"]',
-                status TEXT NOT NULL DEFAULT 'active',
-                lag_ms INTEGER NOT NULL DEFAULT 0,
-                last_synced REAL,
-                config TEXT NOT NULL DEFAULT '{}',
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL,
-                FOREIGN KEY (source_region) REFERENCES regions(id),
-                FOREIGN KEY (target_region) REFERENCES regions(id)
-            );
-            CREATE INDEX IF NOT EXISTS idx_repl_source ON replication_streams(source_region);
-            CREATE INDEX IF NOT EXISTS idx_repl_target ON replication_streams(target_region);
-
-            CREATE TABLE IF NOT EXISTS replication_conflicts (
-                id TEXT PRIMARY KEY,
-                stream_id TEXT NOT NULL,
-                table_name TEXT NOT NULL,
-                record_id TEXT NOT NULL,
-                source_value TEXT NOT NULL DEFAULT '{}',
-                target_value TEXT NOT NULL DEFAULT '{}',
-                resolution TEXT NOT NULL DEFAULT 'unresolved',
-                resolved_at REAL,
-                created_at REAL NOT NULL,
-                FOREIGN KEY (stream_id) REFERENCES replication_streams(id) ON DELETE CASCADE
-            );
-            CREATE INDEX IF NOT EXISTS idx_conflicts_stream ON replication_conflicts(stream_id);
-            CREATE INDEX IF NOT EXISTS idx_conflicts_resolution ON replication_conflicts(resolution);
-
-            CREATE TABLE IF NOT EXISTS failover_log (
-                id TEXT PRIMARY KEY,
-                from_region TEXT NOT NULL,
-                to_region TEXT NOT NULL,
-                reason TEXT,
-                status TEXT NOT NULL DEFAULT 'completed',
-                duration_ms INTEGER NOT NULL DEFAULT 0,
-                created_at REAL NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_failover_time ON failover_log(created_at);
-        """)
-        conn.commit()
 
         # Seed default regions if empty
         existing = conn.execute("SELECT COUNT(*) as cnt FROM regions").fetchone()["cnt"]
         if existing == 0:
             self._seed_defaults()
 
-        logger.info("Multi-region tables initialized")
+        logger.info("Multi-region tables initialized (managed by migrations)")
 
     def _seed_defaults(self) -> None:
         """Seed the 3 default regions."""

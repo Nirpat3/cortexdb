@@ -115,50 +115,8 @@ class ZeroTrustManager:
     # ── Schema ──────────────────────────────────────────────────────────────
 
     def _init_db(self) -> None:
-        conn = self._persistence.conn
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS zt_policies (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                description TEXT DEFAULT '',
-                policy_type TEXT NOT NULL CHECK(policy_type IN ('allow', 'deny', 'require_auth')),
-                source_pattern TEXT NOT NULL DEFAULT '*',
-                destination_pattern TEXT NOT NULL DEFAULT '*',
-                conditions TEXT NOT NULL DEFAULT '{}',
-                priority INTEGER NOT NULL DEFAULT 100,
-                enabled INTEGER NOT NULL DEFAULT 1,
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS zt_certificates (
-                id TEXT PRIMARY KEY,
-                subject TEXT NOT NULL,
-                issuer TEXT NOT NULL DEFAULT 'CortexDB-CA',
-                serial TEXT NOT NULL UNIQUE,
-                fingerprint TEXT NOT NULL UNIQUE,
-                not_before REAL NOT NULL,
-                not_after REAL NOT NULL,
-                status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'revoked', 'expired')),
-                created_at REAL NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS zt_audit_log (
-                id TEXT PRIMARY KEY,
-                policy_id TEXT,
-                source TEXT NOT NULL,
-                destination TEXT NOT NULL,
-                action TEXT NOT NULL CHECK(action IN ('allow', 'deny')),
-                reason TEXT DEFAULT '',
-                timestamp REAL NOT NULL
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_zt_policies_priority ON zt_policies(priority);
-            CREATE INDEX IF NOT EXISTS idx_zt_policies_enabled ON zt_policies(enabled);
-            CREATE INDEX IF NOT EXISTS idx_zt_certs_status ON zt_certificates(status);
-            CREATE INDEX IF NOT EXISTS idx_zt_audit_ts ON zt_audit_log(timestamp);
-        """)
-        conn.commit()
+        # Tables 'zt_policies', 'zt_certificates', and 'zt_audit_log' are managed
+        # by the SQLite migration system (see migrations.py v5).
         self._seed_defaults()
 
     def _seed_defaults(self) -> None:

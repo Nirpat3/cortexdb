@@ -104,48 +104,9 @@ class DiscordIntegration:
     # ── Schema ────────────────────────────────────────────────────────
 
     def _init_db(self) -> None:
-        """Create discord_config and discord_messages tables if they don't exist."""
+        """Ensure data directory exists. Tables 'discord_config' and 'discord_messages'
+        are managed by the SQLite migration system (see migrations.py v5)."""
         os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
-        conn = sqlite3.connect(self._db_path, timeout=10)
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA foreign_keys=ON")
-            conn.executescript("""
-                CREATE TABLE IF NOT EXISTS discord_config (
-                    id TEXT PRIMARY KEY,
-                    guild_id TEXT,
-                    bot_token TEXT,
-                    webhook_url TEXT,
-                    channel_mappings TEXT DEFAULT '{}',
-                    command_prefix TEXT DEFAULT '!cortex',
-                    enabled INTEGER DEFAULT 1,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS discord_messages (
-                    id TEXT PRIMARY KEY,
-                    direction TEXT NOT NULL CHECK(direction IN ('inbound', 'outbound')),
-                    channel_id TEXT,
-                    user_id TEXT,
-                    agent_id TEXT,
-                    message TEXT NOT NULL,
-                    command TEXT,
-                    status TEXT DEFAULT 'pending',
-                    created_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_discord_messages_direction
-                    ON discord_messages(direction);
-                CREATE INDEX IF NOT EXISTS idx_discord_messages_channel
-                    ON discord_messages(channel_id);
-                CREATE INDEX IF NOT EXISTS idx_discord_messages_agent
-                    ON discord_messages(agent_id);
-                CREATE INDEX IF NOT EXISTS idx_discord_messages_created
-                    ON discord_messages(created_at);
-            """)
-            conn.commit()
-        finally:
-            conn.close()
 
     # ── Helpers ────────────────────────────────────────────────────────
 

@@ -164,39 +164,9 @@ class WhiteLabelManager:
     # ── Schema & Seeds ──────────────────────────────────────────────────
 
     def _init_db(self) -> None:
-        """Create theme and branding tables, seed defaults if empty."""
+        """Seed defaults if empty. Tables 'wl_themes' and 'wl_branding' are managed
+        by the SQLite migration system (see migrations.py v5)."""
         conn = self._store.conn
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS wl_themes (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                description TEXT,
-                colors TEXT NOT NULL DEFAULT '{}',
-                typography TEXT NOT NULL DEFAULT '{}',
-                logo_url TEXT,
-                favicon_url TEXT,
-                is_active INTEGER NOT NULL DEFAULT 0,
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_wl_themes_active ON wl_themes(is_active);
-
-            CREATE TABLE IF NOT EXISTS wl_branding (
-                id TEXT PRIMARY KEY,
-                company_name TEXT NOT NULL DEFAULT 'CortexDB',
-                tagline TEXT,
-                support_email TEXT,
-                support_url TEXT,
-                terms_url TEXT,
-                privacy_url TEXT,
-                custom_domain TEXT,
-                custom_css TEXT,
-                email_templates TEXT NOT NULL DEFAULT '{}',
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL
-            );
-        """)
-        conn.commit()
 
         # Seed default themes if none exist
         existing = conn.execute("SELECT COUNT(*) as cnt FROM wl_themes").fetchone()["cnt"]

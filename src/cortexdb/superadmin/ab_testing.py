@@ -37,22 +37,9 @@ class PromptABTesting:
         self._ensure_table()
 
     def _ensure_table(self) -> None:
-        self._persistence.conn.execute(
-            """CREATE TABLE IF NOT EXISTS ab_experiments (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                variant_a TEXT NOT NULL,
-                variant_b TEXT NOT NULL,
-                agent_ids TEXT NOT NULL,
-                task_prompts TEXT NOT NULL,
-                config TEXT DEFAULT '{}',
-                results TEXT DEFAULT '{}',
-                status TEXT DEFAULT 'created',
-                created_at TEXT DEFAULT (datetime('now')),
-                completed_at TEXT
-            )"""
-        )
-        self._persistence.conn.commit()
+        # Table 'ab_experiments' is managed by the SQLite migration system
+        # (see migrations.py v4). No inline CREATE TABLE needed.
+        pass
 
     def _exp_id(self) -> str:
         return f"AB-{uuid.uuid4().hex[:8]}"

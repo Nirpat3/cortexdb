@@ -54,21 +54,8 @@ _REQUIRED_MANIFEST_KEYS = {"id", "name", "version", "type", "entry_point"}
 _DB_DIR = Path(os.environ.get("CORTEXDB_DATA_DIR", "data"))
 _DB_PATH = _DB_DIR / "superadmin.db"
 
-_CREATE_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS installed_plugins (
-    id            TEXT PRIMARY KEY,
-    name          TEXT NOT NULL,
-    version       TEXT NOT NULL,
-    description   TEXT DEFAULT '',
-    author        TEXT DEFAULT '',
-    plugin_type   TEXT NOT NULL CHECK (plugin_type IN ('engine', 'hook', 'middleware')),
-    entry_point   TEXT NOT NULL,
-    config        TEXT DEFAULT '{}',
-    enabled       INTEGER NOT NULL DEFAULT 0,
-    installed_at  TEXT NOT NULL,
-    updated_at    TEXT NOT NULL
-);
-"""
+# Table 'installed_plugins' is managed by the SQLite migration system
+# (see migrations.py v5). The old _CREATE_TABLE_SQL constant has been removed.
 
 
 # ---------------------------------------------------------------------------
@@ -127,8 +114,8 @@ class PluginManager:
     # -- Schema -------------------------------------------------------------
 
     def _ensure_table(self) -> None:
-        self._conn.execute(_CREATE_TABLE_SQL)
-        self._conn.commit()
+        # Table 'installed_plugins' is managed by migrations (v5). No-op.
+        pass
 
     # -- Validation ---------------------------------------------------------
 

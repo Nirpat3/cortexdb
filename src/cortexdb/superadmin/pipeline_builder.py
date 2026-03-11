@@ -194,51 +194,8 @@ class PipelineBuilder:
     # ── Schema ──────────────────────────────────────────────────────────────
 
     def _init_db(self) -> None:
-        conn = self._persistence.conn
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS data_pipelines (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                description TEXT DEFAULT '',
-                stages TEXT NOT NULL DEFAULT '[]',
-                schedule TEXT DEFAULT '',
-                status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft', 'active', 'paused', 'error')),
-                last_run REAL,
-                next_run REAL,
-                run_count INTEGER NOT NULL DEFAULT 0,
-                avg_duration_ms REAL NOT NULL DEFAULT 0,
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS pipeline_runs (
-                id TEXT PRIMARY KEY,
-                pipeline_id TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'running' CHECK(status IN ('running', 'completed', 'failed', 'cancelled')),
-                started_at REAL NOT NULL,
-                completed_at REAL,
-                duration_ms INTEGER,
-                stages_completed INTEGER NOT NULL DEFAULT 0,
-                total_stages INTEGER NOT NULL DEFAULT 0,
-                error TEXT DEFAULT '',
-                output TEXT NOT NULL DEFAULT '{}',
-                FOREIGN KEY (pipeline_id) REFERENCES data_pipelines(id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS pipeline_stage_types (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                description TEXT DEFAULT '',
-                category TEXT NOT NULL CHECK(category IN ('extract', 'transform', 'load')),
-                config_schema TEXT NOT NULL DEFAULT '{}',
-                icon TEXT DEFAULT ''
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_pipeline_runs_pid ON pipeline_runs(pipeline_id);
-            CREATE INDEX IF NOT EXISTS idx_pipeline_runs_status ON pipeline_runs(status);
-            CREATE INDEX IF NOT EXISTS idx_data_pipelines_status ON data_pipelines(status);
-        """)
-        conn.commit()
+        # Tables 'data_pipelines', 'pipeline_runs', and 'pipeline_stage_types'
+        # are managed by the SQLite migration system (see migrations.py v5).
         self._seed_stage_types()
 
     def _seed_stage_types(self) -> None:

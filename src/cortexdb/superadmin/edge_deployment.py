@@ -41,44 +41,9 @@ class EdgeDeploymentManager:
     # ── Schema ──────────────────────────────────────────────────────────
 
     def _init_db(self) -> None:
-        """Create edge_nodes and edge_sync_log tables if they don't exist."""
-        conn = self._store.conn
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS edge_nodes (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                location TEXT NOT NULL,
-                region TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'provisioning',
-                config TEXT NOT NULL DEFAULT '{}',
-                capabilities TEXT NOT NULL DEFAULT '{}',
-                last_heartbeat REAL,
-                data_synced_at REAL,
-                storage_used_mb REAL NOT NULL DEFAULT 0,
-                max_storage_mb REAL NOT NULL DEFAULT 1024,
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_edge_nodes_status ON edge_nodes(status);
-            CREATE INDEX IF NOT EXISTS idx_edge_nodes_region ON edge_nodes(region);
-
-            CREATE TABLE IF NOT EXISTS edge_sync_log (
-                id TEXT PRIMARY KEY,
-                node_id TEXT NOT NULL,
-                direction TEXT NOT NULL,
-                tables_synced TEXT NOT NULL DEFAULT '[]',
-                records_count INTEGER NOT NULL DEFAULT 0,
-                duration_ms INTEGER NOT NULL DEFAULT 0,
-                status TEXT NOT NULL DEFAULT 'pending',
-                error TEXT,
-                created_at REAL NOT NULL,
-                FOREIGN KEY (node_id) REFERENCES edge_nodes(id) ON DELETE CASCADE
-            );
-            CREATE INDEX IF NOT EXISTS idx_edge_sync_node ON edge_sync_log(node_id);
-            CREATE INDEX IF NOT EXISTS idx_edge_sync_status ON edge_sync_log(status);
-        """)
-        conn.commit()
-        logger.info("Edge deployment tables initialized")
+        # Tables 'edge_nodes' and 'edge_sync_log' are managed by the SQLite
+        # migration system (see migrations.py v5).
+        logger.info("Edge deployment tables initialized (managed by migrations)")
 
     # ── Helpers ─────────────────────────────────────────────────────────
 

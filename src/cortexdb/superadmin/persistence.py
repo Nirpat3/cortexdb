@@ -22,82 +22,9 @@ DATA_DIR = Path(os.environ.get("CORTEXDB_DATA_DIR", "./data/superadmin"))
 DB_NAME = "cortexdb_admin.db"
 
 SCHEMA_VERSION = 1
-
-SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS agents (
-    agent_id TEXT PRIMARY KEY,
-    data TEXT NOT NULL,
-    updated_at REAL NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS tasks (
-    task_id TEXT PRIMARY KEY,
-    status TEXT NOT NULL DEFAULT 'pending',
-    priority TEXT NOT NULL DEFAULT 'medium',
-    assigned_to TEXT,
-    data TEXT NOT NULL,
-    created_at REAL NOT NULL,
-    updated_at REAL NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
-CREATE INDEX IF NOT EXISTS idx_tasks_assigned ON tasks(assigned_to);
-
-CREATE TABLE IF NOT EXISTS instructions (
-    instruction_id TEXT PRIMARY KEY,
-    agent_id TEXT,
-    status TEXT NOT NULL DEFAULT 'pending',
-    data TEXT NOT NULL,
-    created_at REAL NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_instructions_agent ON instructions(agent_id);
-
-CREATE TABLE IF NOT EXISTS messages (
-    message_id TEXT PRIMARY KEY,
-    msg_type TEXT NOT NULL,
-    from_agent TEXT NOT NULL,
-    to_agent TEXT,
-    department TEXT,
-    status TEXT NOT NULL DEFAULT 'sent',
-    data TEXT NOT NULL,
-    created_at REAL NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_messages_to ON messages(to_agent);
-CREATE INDEX IF NOT EXISTS idx_messages_type ON messages(msg_type);
-
-CREATE TABLE IF NOT EXISTS audit_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp REAL NOT NULL,
-    action TEXT NOT NULL,
-    entity_type TEXT NOT NULL,
-    entity_id TEXT NOT NULL,
-    actor TEXT NOT NULL DEFAULT 'superadmin',
-    details TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity_type);
-CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_log(timestamp);
-
-CREATE TABLE IF NOT EXISTS counters (
-    name TEXT PRIMARY KEY,
-    value INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS provider_config (
-    provider TEXT PRIMARY KEY,
-    data TEXT NOT NULL,
-    updated_at REAL NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS kv_store (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL,
-    updated_at REAL NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS schema_version (
-    version INTEGER PRIMARY KEY,
-    applied_at REAL NOT NULL
-);
-"""
+# NOTE: Schema is managed by the SQLite migration system in migrations.py.
+# The old SCHEMA_SQL constant was removed — it was dead code superseded by
+# MigrationRunner which is invoked in _init_schema() below.
 
 
 class PersistenceStore:

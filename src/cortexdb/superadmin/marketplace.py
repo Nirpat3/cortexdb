@@ -458,37 +458,9 @@ class MarketplaceManager:
             return False
 
     def _init_db(self) -> None:
-        """Create the marketplace_capabilities table and seed defaults."""
+        """Seed defaults. Table 'marketplace_capabilities' is managed by the
+        SQLite migration system (see migrations.py v5)."""
         conn = self._get_connection()
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS marketplace_capabilities (
-                id          TEXT PRIMARY KEY,
-                name        TEXT NOT NULL,
-                description TEXT NOT NULL DEFAULT '',
-                category    TEXT NOT NULL DEFAULT 'core',
-                icon        TEXT NOT NULL DEFAULT 'box',
-                version     TEXT NOT NULL DEFAULT '1.0.0',
-                enabled     INTEGER NOT NULL DEFAULT 0,
-                config      TEXT NOT NULL DEFAULT '{}',
-                dependencies TEXT NOT NULL DEFAULT '[]',
-                tier        TEXT NOT NULL DEFAULT 'free',
-                installed_at TEXT,
-                updated_at  TEXT
-            )
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_marketplace_category
-            ON marketplace_capabilities(category)
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_marketplace_enabled
-            ON marketplace_capabilities(enabled)
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_marketplace_tier
-            ON marketplace_capabilities(tier)
-        """)
-        conn.commit()
 
         # Seed defaults if table is empty, or add missing capabilities
         row = conn.execute(

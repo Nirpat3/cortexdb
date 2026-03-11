@@ -254,43 +254,9 @@ class GraphQLGateway:
             return False
 
     def _init_db(self) -> None:
-        """Create GraphQL gateway tables and seed the default schema."""
+        """Seed the default schema. Tables 'graphql_schemas' and 'graphql_query_log'
+        are managed by the SQLite migration system (see migrations.py v5)."""
         conn = self._get_connection()
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS graphql_schemas (
-                id          TEXT PRIMARY KEY,
-                name        TEXT NOT NULL,
-                schema_sdl  TEXT NOT NULL,
-                config      TEXT NOT NULL DEFAULT '{}',
-                enabled     INTEGER NOT NULL DEFAULT 1,
-                created_at  TEXT NOT NULL,
-                updated_at  TEXT NOT NULL
-            )
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_graphql_schemas_enabled
-            ON graphql_schemas(enabled)
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS graphql_query_log (
-                id              TEXT PRIMARY KEY,
-                query           TEXT NOT NULL,
-                variables       TEXT NOT NULL DEFAULT '{}',
-                response_time_ms REAL NOT NULL DEFAULT 0.0,
-                status          TEXT NOT NULL DEFAULT 'success',
-                error           TEXT,
-                created_at      TEXT NOT NULL
-            )
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_graphql_query_log_created
-            ON graphql_query_log(created_at DESC)
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_graphql_query_log_status
-            ON graphql_query_log(status)
-        """)
-        conn.commit()
 
         # Seed default schema if table is empty
         row = conn.execute("SELECT COUNT(*) AS cnt FROM graphql_schemas").fetchone()

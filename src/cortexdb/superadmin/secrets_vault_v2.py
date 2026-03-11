@@ -36,48 +36,8 @@ class SecretsVaultV2:
     # ── Schema ──────────────────────────────────────────────────────────────
 
     def _init_db(self) -> None:
-        conn = self._persistence.conn
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS vault_secrets (
-                id TEXT PRIMARY KEY,
-                path TEXT NOT NULL UNIQUE,
-                value_encrypted TEXT NOT NULL,
-                metadata TEXT NOT NULL DEFAULT '{}',
-                version INTEGER NOT NULL DEFAULT 1,
-                lease_duration INTEGER NOT NULL DEFAULT 0,
-                lease_expires REAL,
-                rotation_policy TEXT NOT NULL DEFAULT '{}',
-                created_by TEXT NOT NULL DEFAULT 'system',
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS vault_access_log (
-                id TEXT PRIMARY KEY,
-                path TEXT NOT NULL,
-                operation TEXT NOT NULL CHECK(operation IN ('read', 'write', 'delete', 'rotate', 'list')),
-                accessor TEXT NOT NULL DEFAULT 'system',
-                status TEXT NOT NULL DEFAULT 'success',
-                timestamp REAL NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS vault_rotation_schedule (
-                id TEXT PRIMARY KEY,
-                secret_path TEXT NOT NULL UNIQUE,
-                interval_hours INTEGER NOT NULL,
-                last_rotated REAL,
-                next_rotation REAL,
-                rotation_handler TEXT DEFAULT '',
-                enabled INTEGER NOT NULL DEFAULT 1,
-                created_at REAL NOT NULL
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_vault_secrets_path ON vault_secrets(path);
-            CREATE INDEX IF NOT EXISTS idx_vault_access_ts ON vault_access_log(timestamp);
-            CREATE INDEX IF NOT EXISTS idx_vault_access_path ON vault_access_log(path);
-            CREATE INDEX IF NOT EXISTS idx_vault_rotation_next ON vault_rotation_schedule(next_rotation);
-        """)
-        conn.commit()
+        # Tables 'vault_secrets', 'vault_access_log', and 'vault_rotation_schedule'
+        # are managed by the SQLite migration system (see migrations.py v5).
 
         # Auto-unseal if no secrets exist yet (first run)
         count = conn.execute("SELECT COUNT(*) FROM vault_secrets").fetchone()[0]
