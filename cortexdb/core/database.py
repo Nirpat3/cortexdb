@@ -169,7 +169,7 @@ class ReadCascade:
 
     def _query_hash(self, query: str, params: Optional[Dict] = None,
                     tenant_id: Optional[str] = None) -> str:
-        key = (tenant_id or "") + ":" + query + (json.dumps(params, sort_keys=True) if params else "")
+        key = (tenant_id or "") + ":" + query + (json.dumps(params, sort_keys=True, default=str) if params else "")
         return hashlib.sha256(key.encode()).hexdigest()[:32]
 
     async def read(self, query: str, params: Optional[Dict] = None,
@@ -207,7 +207,7 @@ class ReadCascade:
                                          latency_ms=(time.perf_counter() - start) * 1000, cache_hit=True)
                     return self._post_read(result, query, tenant_id)
             except Exception as e:
-                logger.warning(f"R1 error: {e}")
+                logger.warning(f"R1 error for tenant={tenant_id} qhash={qhash}: {e}")
 
         # R2: Semantic Cache / VectorCore (adaptive thresholds)
         if "vector" in self.engines and hint != "skip_semantic":
@@ -231,7 +231,7 @@ class ReadCascade:
                                              latency_ms=(time.perf_counter() - start) * 1000, cache_hit=True)
                         return self._post_read(result, query, tenant_id)
             except Exception as e:
-                logger.warning(f"R2 error: {e}")
+                logger.warning(f"R2 error for tenant={tenant_id} qhash={qhash}: {e}")
 
         # R3: Persistent Store (with request coalescing to prevent cache stampede)
         if "relational" in self.engines:
@@ -387,8 +387,8 @@ class ReadCascade:
         if "memory" in self.engines:
             try:
                 await self.engines["memory"].set(key, json.dumps(data, default=str), ex=ttl)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"R1 promotion failed: {e}")
 
     @property
     def stats(self) -> Dict:
@@ -435,7 +435,7 @@ class SynapticPlasticity:
 
     @property
     def top_paths(self) -> List[Dict]:
-        sorted_paths = sorted(self._path_strengths.items(), key=lambda x: x[1], reverse=True)
+        sorted_paths = sorted(dict(self._path_strengths).items(), key=lambda x: x[1], reverse=True)
         return [{"path": k, "strength": v, "hits": self._path_hits.get(k, 0)}
                 for k, v in sorted_paths[:20]]
 
@@ -800,8 +800,8 @@ class CortexDB:
         try:
             from cortexdb.core.embedding import EmbeddingPipeline
             self.embedding = EmbeddingPipeline()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Embedding pipeline unavailable: {e}")
 
         # Initialize Hybrid Search
         if self.embedding:

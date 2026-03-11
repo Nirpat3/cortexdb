@@ -28,12 +28,14 @@ class OutboxWorker:
     CLEANUP_INTERVAL = 600.0  # 10 minutes between cleanup runs
     CLEANUP_AGE_HOURS = 24    # delete completed entries older than this
     STUCK_TIMEOUT_SECONDS = 300  # 5 min: reset stuck 'processing' entries
+    RECOVER_STUCK_INTERVAL = 60.0  # seconds between stuck-recovery runs
 
     def __init__(self, pool: Any, engines: Dict[str, Any]):
         self.pool = pool
         self.engines = engines
         self._poll_task: Optional[asyncio.Task] = None
         self._cleanup_task: Optional[asyncio.Task] = None
+        self._recover_task: Optional[asyncio.Task] = None
         self._running = False
         self._processed_total = 0
         self._failed_total = 0
@@ -47,6 +49,7 @@ class OutboxWorker:
         self._running = True
         self._poll_task = asyncio.create_task(self._poll_loop())
         self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+        self._recover_task = asyncio.create_task(self._recover_loop())
         logger.info("OutboxWorker started")
 
     async def stop(self, timeout: float = 30.0):
@@ -62,6 +65,9 @@ class OutboxWorker:
         if self._cleanup_task and not self._cleanup_task.done():
             self._cleanup_task.cancel()
             tasks.append(self._cleanup_task)
+        if self._recover_task and not self._recover_task.done():
+            self._recover_task.cancel()
+            tasks.append(self._recover_task)
 
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -96,6 +102,20 @@ class OutboxWorker:
             except Exception as e:
                 logger.error(f"OutboxWorker cleanup error: {e}")
 
+    async def _recover_loop(self):
+        """Periodic recovery of entries stuck in 'processing' state."""
+        while self._running:
+            try:
+                await asyncio.sleep(self.RECOVER_STUCK_INTERVAL)
+            except asyncio.CancelledError:
+                break
+            try:
+                await self._recover_stuck()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"OutboxWorker recover-stuck error: {e}")
+
     async def _recover_stuck(self):
         """Reset entries stuck in 'processing' for longer than STUCK_TIMEOUT_SECONDS.
 
@@ -116,9 +136,6 @@ class OutboxWorker:
 
     async def _process_batch(self):
         """Claim a batch of pending/retryable entries and dispatch them."""
-        # First, recover any entries stuck in 'processing' from crashed workers
-        await self._recover_stuck()
-
         async with self.pool.acquire() as conn:
             # Claim entries atomically with FOR UPDATE SKIP LOCKED
             rows = await conn.fetch("""

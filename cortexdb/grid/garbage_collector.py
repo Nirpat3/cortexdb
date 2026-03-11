@@ -156,8 +156,8 @@ class GridGarbageCollector:
                             node.node_id, NodeState.QUARANTINE,
                             "GGC stale route purge - dead > 10m")
                         purged += 1
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"GGC: Failed to transition {node.node_id} to QUARANTINE: {e}")
 
         self.stats.stale_routes_purged += purged
         if purged > 0:

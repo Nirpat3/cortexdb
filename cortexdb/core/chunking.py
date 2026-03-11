@@ -83,7 +83,7 @@ class ChunkingPipeline:
         chunk_index = 0
 
         # Pre-compute word offsets once — O(n) instead of O(n²) per chunk
-        self._word_offsets = self._build_word_offsets(text, words)
+        word_offsets = self._build_word_offsets(text, words)
 
         while idx < len(words):
             end = min(idx + target_words, len(words))
@@ -95,8 +95,8 @@ class ChunkingPipeline:
             content = " ".join(chunk_words)
 
             # Calculate character offsets in the original text
-            start_char = self._find_word_offset(text, words, idx)
-            end_char = self._find_word_offset(text, words, end - 1) + len(words[end - 1]) if end > 0 else 0
+            start_char = self._find_word_offset(text, words, idx, offsets=word_offsets)
+            end_char = self._find_word_offset(text, words, end - 1, offsets=word_offsets) + len(words[end - 1]) if end > 0 else 0
 
             token_count = self._estimate_tokens(content)
 
@@ -130,7 +130,7 @@ class ChunkingPipeline:
                     extended_content = last.content + " " + remaining
                     extended_tokens = self._estimate_tokens(extended_content)
                     if extended_tokens <= max_words:
-                        last_end_char = self._find_word_offset(text, words, len(words) - 1) + len(words[-1])
+                        last_end_char = self._find_word_offset(text, words, len(words) - 1, offsets=word_offsets) + len(words[-1])
                         chunks[-1] = Chunk(
                             chunk_id=last.chunk_id,
                             doc_id=last.doc_id,
@@ -368,16 +368,16 @@ class ChunkingPipeline:
                 pos = idx + len(word)
         return offsets
 
-    def _find_word_offset(self, text: str, words: List[str], word_index: int) -> int:
+    def _find_word_offset(self, text: str, words: List[str], word_index: int,
+                          offsets: List[int] = None) -> int:
         """Find the character offset of the Nth word in the original text.
 
-        Uses pre-computed offsets if available (set by callers via
-        ``_word_offsets``), otherwise falls back to a single-pass build.
+        Uses pre-computed *offsets* if provided, otherwise builds them fresh.
         """
         if word_index >= len(words):
             return len(text)
-        if not hasattr(self, '_word_offsets') or self._word_offsets is None:
-            self._word_offsets = self._build_word_offsets(text, words)
-        if word_index < len(self._word_offsets):
-            return self._word_offsets[word_index]
+        if offsets is None:
+            offsets = self._build_word_offsets(text, words)
+        if word_index < len(offsets):
+            return offsets[word_index]
         return len(text)

@@ -1,5 +1,5 @@
 """
-CortexDB API Server v4.0
+CortexDB API Server v6.1
 Port 5400: CortexQL API  |  Port 5401: Health  |  Port 5402: Admin
 
 AI Agent Data Infrastructure — cross-engine queries, semantic caching, write fan-out, A2A.
@@ -120,8 +120,8 @@ async def lifespan(app: FastAPI):
     try:
         from cortexdb.observability.tracing import setup_tracing
         setup_tracing()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"OTel tracing setup failed (non-fatal): {e}")
 
     # MCP Server
     mcp_server = CortexMCPServer(db)
@@ -190,7 +190,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="CortexDB", description="Consciousness-Inspired Unified Database - Petabyte-Scale, Compliance-Certified",
-              version="4.0.0", lifespan=lifespan)
+              version="6.1.0", lifespan=lifespan)
 _cors_origins = os.environ.get("CORTEX_CORS_ORIGINS", "http://localhost:3000,http://localhost:5400").split(",")
 app.add_middleware(CORSMiddleware, allow_origins=_cors_origins,
                    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
@@ -451,14 +451,18 @@ async def trigger_decay(request: Request):
     return {"status": "decay_triggered"}
 
 @app.post("/admin/ledger/verify")
-async def verify_ledger():
+async def verify_ledger(request: Request):
+    denied = _require_admin(request)
+    if denied: return denied
     if "immutable" in db.engines:
         intact = await db.engines["immutable"].verify_chain()
         return {"chain_intact": intact, "entries": len(db.engines["immutable"]._chain)}
     return {"error": "ImmutableCore not connected"}
 
 @app.post("/admin/sleep-cycle/run")
-async def run_sleep_cycle():
+async def run_sleep_cycle(request: Request):
+    denied = _require_admin(request)
+    if denied: return denied
     if db and db.sleep_cycle:
         result = await db.sleep_cycle.run()
         return {"status": "completed", "tasks_run": result.tasks_run,
@@ -466,7 +470,9 @@ async def run_sleep_cycle():
     return {"error": "Sleep cycle not available"}
 
 @app.get("/admin/sleep-cycle/status")
-async def sleep_cycle_status():
+async def sleep_cycle_status(request: Request):
+    denied = _require_admin(request)
+    if denied: return denied
     return db.sleep_cycle.get_status() if db and db.sleep_cycle else {}
 
 
@@ -482,6 +488,8 @@ async def set_cache_config(request: Request):
       - negative_cache (bool, optional): Cache empty results (default False)
       - max_entries (int, optional): Max cached entries (default 10000)
     """
+    denied = _require_admin(request)
+    if denied: return denied
     if not db or not db.read_cascade:
         raise HTTPException(503, "CortexDB not initialized")
     body = await request.json()
@@ -510,8 +518,10 @@ async def set_cache_config(request: Request):
 
 
 @app.get("/admin/cache/config")
-async def get_cache_config():
+async def get_cache_config(request: Request):
     """Get current semantic cache configuration."""
+    denied = _require_admin(request)
+    if denied: return denied
     if not db or not db.read_cascade:
         raise HTTPException(503, "CortexDB not initialized")
     return db.read_cascade.cache_config.to_dict()
@@ -670,7 +680,12 @@ async def circuit_breaker_status():
 @app.get("/v1/heartbeat/health-history")
 async def health_history(tier: Optional[int] = None):
     from cortexdb.heartbeat.health_checks import HealthTier
-    t = HealthTier(tier) if tier else None
+    t = None
+    if tier is not None:
+        try:
+            t = HealthTier(tier)
+        except ValueError:
+            raise HTTPException(400, f"Invalid tier: {tier}. Valid values: {[e.value for e in HealthTier]}")
     return {"history": health_runner.get_history(t) if health_runner else []}
 
 @app.get("/v1/ledger/recent")
@@ -864,11 +879,15 @@ async def cg_compute_all_profiles(request: Request, limit: int = 1000):
 
 # -- Bridge Endpoints (DOC-018 G9) --
 
+class BridgeQueryRequest(BaseModel):
+    sub_queries: List[Dict]
+    merge_key: Optional[str] = None
+
 @app.post("/v1/bridge/query")
-async def bridge_query(sub_queries: List[Dict], merge_key: Optional[str] = None):
+async def bridge_query(req: BridgeQueryRequest):
     if not db or not db.bridge:
         raise HTTPException(503, "Bridge not initialized")
-    return await db.bridge.query(sub_queries, merge_key)
+    return await db.bridge.query(req.sub_queries, req.merge_key)
 
 
 # -- Scale: Sharding Endpoints (Citus) --
@@ -1092,7 +1111,8 @@ async def encryption_rotate(request: Request):
 # -- Compliance: Audit Trail Endpoints --
 
 @app.get("/v1/compliance/audit-log")
-async def audit_log(event_type: Optional[str] = None,
+async def audit_log(request: Request,
+                    event_type: Optional[str] = None,
                     actor: Optional[str] = None,
                     tenant_id: Optional[str] = None,
                     severity: Optional[str] = None,
@@ -1100,9 +1120,26 @@ async def audit_log(event_type: Optional[str] = None,
     """Query compliance audit trail."""
     if not compliance_audit:
         return {"events": []}
-    et = AuditEventType(event_type) if event_type else None
+    # Enforce tenant access control: non-admin callers can only query their own tenant
+    caller_tid = _tenant_id(request)
+    is_admin = _require_admin(request) is None
+    if not is_admin:
+        # Restrict to caller's own tenant; ignore any user-supplied tenant_id
+        tenant_id = caller_tid
+    # Validate enum params to return 400 instead of 500
+    et = None
+    if event_type:
+        try:
+            et = AuditEventType(event_type)
+        except ValueError:
+            raise HTTPException(400, f"Invalid event_type: {event_type}")
     from cortexdb.compliance.audit import AuditSeverity
-    sev = AuditSeverity(severity) if severity else None
+    sev = None
+    if severity:
+        try:
+            sev = AuditSeverity(severity)
+        except ValueError:
+            raise HTTPException(400, f"Invalid severity: {severity}")
     events = compliance_audit.query_events(
         event_type=et, actor=actor, tenant_id=tenant_id,
         severity=sev, limit=limit)

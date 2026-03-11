@@ -36,7 +36,7 @@ _STOP_WORDS = {
 
 def _tokenize(text: str) -> List[str]:
     """Lowercase tokenization with basic punctuation removal."""
-    return re.findall(r"[a-z0-9]+", text.lower())
+    return re.findall(r"[\w]+", text.lower())
 
 
 def _content_tokens(text: str) -> set:

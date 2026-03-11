@@ -368,6 +368,7 @@ class A2AProtocol:
                          status: Optional[str] = None,
                          tenant_id: Optional[str] = None,
                          limit: int = 50) -> List[Dict]:
+        limit = max(1, min(limit, 500))
         # When PG is available, query it for the authoritative list
         if self._pool:
             try:
@@ -403,7 +404,7 @@ class A2AProtocol:
                         "target": d.get("assigned_agent", ""),
                         "skill": d.get("task_type", ""),
                         "status": d["status"],
-                        "priority": 3,
+                        "priority": d.get("priority", 3),
                         "created_at": created.timestamp() if hasattr(created, "timestamp") else created,
                         "completed_at": completed.timestamp() if hasattr(completed, "timestamp") else completed,
                     })

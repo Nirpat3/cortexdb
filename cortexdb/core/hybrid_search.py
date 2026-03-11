@@ -215,6 +215,12 @@ class HybridSearch:
             if cid not in scores:
                 scores[cid] = {"rrf": 0, "dense": 0, "sparse": 0,
                                "content": content, "metadata": r.get("payload", {})}
+            else:
+                # Merge metadata from sparse source, preserving existing keys
+                sparse_meta = r.get("payload", {})
+                for k, v in sparse_meta.items():
+                    if k not in scores[cid]["metadata"]:
+                        scores[cid]["metadata"][k] = v
             scores[cid]["rrf"] += sparse_weight / (self.RRF_K + rank + 1)
             scores[cid]["sparse"] = sparse_score
 

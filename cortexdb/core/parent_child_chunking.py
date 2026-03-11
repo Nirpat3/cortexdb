@@ -290,8 +290,8 @@ class HierarchicalChunker:
                     parent_id=parent_id,
                     content=c_content,
                     chunk_index=child_global_index,
-                    start_char=c_start,   # relative to parent start
-                    end_char=c_end,
+                    start_char=p_start + c_start,   # absolute offset in document
+                    end_char=p_start + c_end,
                     token_count=_estimate_tokens(c_content),
                     metadata=child_meta,
                 )
