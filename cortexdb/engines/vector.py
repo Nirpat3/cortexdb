@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 from cortexdb.engines import BaseEngine
 from cortexdb.core.embedding import EmbeddingPipeline
@@ -56,7 +57,7 @@ class VectorEngine(BaseEngine):
     def __init__(self, config: Dict):
         self.url = config.get("url", "http://localhost:6333")
         self.client = None
-        self._collections_created: set = set()
+        self._collections_created: OrderedDict = OrderedDict()
         self._collection_lock = asyncio.Lock()
         self._search_count = 0
         self._write_count = 0
@@ -67,13 +68,13 @@ class VectorEngine(BaseEngine):
         self.client = AsyncQdrantClient(url=self.url)
         collections = await self.client.get_collections()
         names = [c.name for c in collections.collections]
-        self._collections_created = set(names)
+        self._collections_created = OrderedDict.fromkeys(names)
         if "response_cache" not in names:
             await self.client.create_collection(
                 "response_cache",
                 vectors_config=VectorParams(size=VECTOR_DIM, distance=Distance.COSINE)
             )
-            self._collections_created.add("response_cache")
+            self._collections_created["response_cache"] = None
 
     async def close(self):
         if self.client:
@@ -106,12 +107,14 @@ class VectorEngine(BaseEngine):
                     vectors_config=VectorParams(size=VECTOR_DIM, distance=Distance.COSINE)
                 )
                 if len(self._collections_created) >= 10000:
-                    self._collections_created.clear()
-                self._collections_created.add(collection)
+                    # Evict oldest ~10% of entries instead of clearing all
+                    for _ in range(1000):
+                        self._collections_created.popitem(last=False)
+                self._collections_created[collection] = None
             except Exception as e:
                 err_str = str(e).lower()
                 if "already exists" in err_str or "conflict" in err_str:
-                    self._collections_created.add(collection)
+                    self._collections_created[collection] = None
                 else:
                     logger.warning(f"Failed to create collection '{collection}': {e}")
 
@@ -205,7 +208,8 @@ class VectorEngine(BaseEngine):
         """Delete a collection and remove it from the tracking set."""
         try:
             await self.client.delete_collection(collection)
-            self._collections_created.discard(collection)
+            async with self._collection_lock:
+                self._collections_created.discard(collection)
             return True
         except Exception as e:
             logger.warning(f"Failed to delete collection '{collection}': {e}")

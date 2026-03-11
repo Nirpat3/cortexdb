@@ -19,3 +19,4 @@ CREATE TABLE IF NOT EXISTS write_outbox (
 
 CREATE INDEX IF NOT EXISTS idx_outbox_pending ON write_outbox (status, next_retry_at) WHERE status IN ('pending', 'failed');
 CREATE INDEX IF NOT EXISTS idx_outbox_cleanup ON write_outbox (status, processed_at) WHERE status = 'completed';
+CREATE INDEX IF NOT EXISTS idx_outbox_stuck ON write_outbox (status, created_at) WHERE status = 'processing';

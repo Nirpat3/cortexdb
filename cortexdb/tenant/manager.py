@@ -148,6 +148,9 @@ class TenantManager:
                       plan: TenantPlan = TenantPlan.FREE,
                       config: Dict = None) -> Dict:
         """Step 1-5: Create tenant, resources, API key, activate."""
+        if tenant_id.startswith("__"):
+            raise ValueError(
+                f"Tenant ID '{tenant_id}' is reserved (prefix '__' is reserved for internal use)")
         if tenant_id in self._tenants:
             raise ValueError(f"Tenant {tenant_id} already exists")
 

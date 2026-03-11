@@ -22,8 +22,6 @@ class GGCStats:
     orphaned_links_removed: int = 0
     stale_routes_purged: int = 0
     tombstones_purged: int = 0
-    redis_keys_freed: int = 0
-    credentials_revoked: int = 0
     compactions_run: int = 0
     last_run: Dict[str, float] = field(default_factory=dict)
 
@@ -188,8 +186,6 @@ class GridGarbageCollector:
             "orphaned_links_removed": self.stats.orphaned_links_removed,
             "stale_routes_purged": self.stats.stale_routes_purged,
             "tombstones_purged": self.stats.tombstones_purged,
-            "redis_keys_freed": self.stats.redis_keys_freed,
-            "credentials_revoked": self.stats.credentials_revoked,
             "compactions_run": self.stats.compactions_run,
             "last_run": self.stats.last_run,
             "running": self._running,

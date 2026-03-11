@@ -261,6 +261,8 @@ CREATE TABLE IF NOT EXISTS response_cache_meta (
     ttl_seconds INTEGER DEFAULT 3600
 );
 
+CREATE INDEX IF NOT EXISTS idx_rcm_query_hash ON response_cache_meta(query_hash);
+
 -- ================================================
 -- TEMPORALCORE: Time-series tables (TimescaleDB)
 -- Brain Region: Cerebellum (temporal patterns)
@@ -495,6 +497,7 @@ CREATE POLICY experience_tenant_isolation ON experience_ledger
     USING (tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant', true));
 
 -- Rate limiting tracking table
+-- NOTE: This table grows unboundedly. Schedule periodic cleanup (e.g., DELETE WHERE created_at < NOW() - INTERVAL '30 days').
 CREATE TABLE IF NOT EXISTS rate_limit_log (
     id BIGSERIAL PRIMARY KEY,
     tenant_id VARCHAR(100),
@@ -502,10 +505,12 @@ CREATE TABLE IF NOT EXISTS rate_limit_log (
     endpoint VARCHAR(255),
     count INTEGER DEFAULT 1,
     window_start TIMESTAMPTZ DEFAULT NOW(),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
     exceeded BOOLEAN DEFAULT FALSE
 );
 
 CREATE INDEX idx_rate_limit_tenant ON rate_limit_log(tenant_id, window_start);
+CREATE INDEX IF NOT EXISTS idx_rate_limit_log_created ON rate_limit_log(created_at);
 
 -- ================================================
 -- SEED: Additional ASA Standards for multi-tenancy

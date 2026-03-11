@@ -9,6 +9,7 @@ Run: uvicorn cortexdb.server:app --host 0.0.0.0 --port 5400
 
 import asyncio
 import os
+import re
 import time
 import logging
 import secrets
@@ -212,6 +213,15 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="CortexDB", description="Consciousness-Inspired Unified Database - Petabyte-Scale, Compliance-Certified",
               version="6.1.0", lifespan=lifespan)
 _cors_origins = os.environ.get("CORTEX_CORS_ORIGINS", "http://localhost:3000,http://localhost:5400").split(",")
+_cortex_env = os.environ.get("CORTEX_ENV", "development").lower()
+if "*" in _cors_origins:
+    if _cortex_env == "production":
+        raise RuntimeError("CORS wildcard '*' is not allowed in production mode (CORTEX_ENV=production). "
+                           "Set CORTEX_CORS_ORIGINS to explicit origins.")
+    else:
+        logging.getLogger("cortexdb.server").warning(
+            "CORS wildcard '*' detected in CORTEX_CORS_ORIGINS. "
+            "This is insecure and will be rejected in production mode.")
 app.add_middleware(CORSMiddleware, allow_origins=_cors_origins,
                    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
                    allow_headers=["Authorization", "Content-Type", "X-Tenant-Key", "X-Request-ID"])
@@ -228,6 +238,11 @@ class _RequestSizeLimitMiddleware(BaseHTTPMiddleware):
                     return Response("Request body too large", status_code=413)
             except ValueError:
                 return Response("Invalid Content-Length header", status_code=400)
+        elif request.method in ("POST", "PUT", "PATCH"):
+            # No Content-Length header (e.g. chunked encoding) — read body and check size
+            body = await request.body()
+            if len(body) > MAX_REQUEST_BODY_BYTES:
+                return Response("Request body too large", status_code=413)
         return await call_next(request)
 
 
@@ -1319,10 +1334,11 @@ async def rag_hybrid_search(request: Request, body: dict):
         return JSONResponse(status_code=503, content={"error": "Database not initialized"})
     if not db.hybrid_search:
         return JSONResponse(status_code=503, content={"error": "Hybrid search not available"})
+    collection = _validate_collection(body.get("collection", "documents"))
     with trace_span("rag_hybrid_search", attributes={"tenant_id": tid or ""}):
         results = await db.hybrid_search.search(
             query=body["query"],
-            collection=body.get("collection", "documents"),
+            collection=collection,
             limit=max(1, min(int(body.get("limit", 10)), 500)),
             tenant_id=tid,
             rerank=body.get("rerank", True),
@@ -1430,6 +1446,14 @@ async def run_stress_test(
 # ── RAG Pipeline Endpoints ─────────────────────────────────────────
 
 MAX_RAG_TEXT_SIZE = 10 * 1024 * 1024  # 10MB max ingest size
+_COLLECTION_RE = re.compile(r'^[a-zA-Z0-9_-]+$')
+
+
+def _validate_collection(name: str) -> str:
+    """Validate and return a collection name, or raise 400."""
+    if not _COLLECTION_RE.match(name):
+        raise HTTPException(status_code=400, detail="Invalid collection name. Must match ^[a-zA-Z0-9_-]+$")
+    return name
 
 
 @app.post("/v1/rag/ingest")
@@ -1442,10 +1466,11 @@ async def rag_ingest(request: Request, body: dict):
     if len(body["text"]) > MAX_RAG_TEXT_SIZE:
         raise HTTPException(status_code=413, detail=f"Text exceeds {MAX_RAG_TEXT_SIZE // (1024*1024)}MB limit")
     tid = _tenant_id(request)
+    collection = _validate_collection(body.get("collection", "documents"))
     with trace_span("rag_ingest", attributes={"tenant_id": tid or "", "doc_id": body["doc_id"]}):
         result = await db.rag.ingest(
             text=body["text"], doc_id=body["doc_id"],
-            collection=body.get("collection", "documents"),
+            collection=collection,
             metadata=body.get("metadata"), tenant_id=tid)
         return result
 
@@ -1458,9 +1483,10 @@ async def rag_retrieve(request: Request, body: dict):
     if "query" not in body:
         raise HTTPException(status_code=422, detail="Required field: query")
     tid = _tenant_id(request)
+    collection = _validate_collection(body.get("collection", "documents"))
     result = await db.rag.retrieve_with_context(
         query=body["query"],
-        collection=body.get("collection", "documents"),
+        collection=collection,
         limit=max(1, min(int(body.get("limit", 5)), 500)),
         max_tokens=body.get("max_tokens", 4000),
         tenant_id=tid,
@@ -1476,9 +1502,10 @@ async def rag_smart_retrieve(request: Request, body: dict):
     if "query" not in body:
         raise HTTPException(status_code=422, detail="Required field: query")
     tid = _tenant_id(request)
+    collection = _validate_collection(body.get("collection", "documents"))
     result = await db.rag.smart_retrieve(
         query=body["query"],
-        collection=body.get("collection", "documents"),
+        collection=collection,
         limit=max(1, min(int(body.get("limit", 5)), 500)),
         threshold=body.get("threshold", 0.75),
         tenant_id=tid,
@@ -1496,9 +1523,10 @@ async def rag_ingest_hierarchical(request: Request, body: dict):
     if len(body["text"]) > MAX_RAG_TEXT_SIZE:
         raise HTTPException(status_code=413, detail=f"Text exceeds {MAX_RAG_TEXT_SIZE // (1024*1024)}MB limit")
     tid = _tenant_id(request)
+    collection = _validate_collection(body.get("collection", "documents"))
     result = await db.rag.ingest_hierarchical(
         text=body["text"], doc_id=body["doc_id"],
-        collection=body.get("collection", "documents"),
+        collection=collection,
         metadata=body.get("metadata"), tenant_id=tid)
     return result
 

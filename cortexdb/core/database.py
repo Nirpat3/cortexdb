@@ -672,7 +672,7 @@ class WriteFanOut:
             return []
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT * FROM write_outbox WHERE status = 'dead_letter' ORDER BY id"
+                "SELECT * FROM write_outbox WHERE status = 'dead_letter' ORDER BY id LIMIT 1000"
             )
             return [dict(row) for row in rows]
 

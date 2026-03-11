@@ -31,9 +31,10 @@ class OutboxWorker:
     RECOVER_STUCK_INTERVAL = 60.0  # seconds between stuck-recovery runs
     DISPATCH_CONCURRENCY = 10     # max concurrent dispatches per batch
 
-    def __init__(self, pool: Any, engines: Dict[str, Any]):
+    def __init__(self, pool: Any, engines: Dict[str, Any], metrics: Optional[Any] = None):
         self.pool = pool
         self.engines = engines
+        self._metrics = metrics
         self._poll_task: Optional[asyncio.Task] = None
         self._cleanup_task: Optional[asyncio.Task] = None
         self._recover_task: Optional[asyncio.Task] = None
@@ -204,6 +205,9 @@ class OutboxWorker:
             self._processed_total += 1
             self._latency_sum += elapsed
             self._latency_count += 1
+            if self._metrics:
+                self._metrics.inc("outbox_dispatched_total")
+                self._metrics.observe("outbox_dispatch_latency_seconds", elapsed)
 
         except Exception as e:
             elapsed = time.perf_counter() - start
@@ -215,6 +219,9 @@ class OutboxWorker:
                 conn, entry_id, retry_count, max_retries, str(e)
             )
             self._failed_total += 1
+            if self._metrics:
+                self._metrics.inc("outbox_dispatch_failures_total")
+                self._metrics.observe("outbox_dispatch_latency_seconds", elapsed)
 
     async def _mark_failed(self, conn: Any, entry_id: int,
                            retry_count: int, max_retries: int,

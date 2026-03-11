@@ -98,7 +98,16 @@ class TenantMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         # Brute force protection: check if this IP is locked out
-        client_ip = request.client.host if request.client else "unknown"
+        # Support reverse proxy headers: use last entry in X-Forwarded-For (closest proxy),
+        # or X-Real-IP, falling back to direct connection IP.
+        forwarded_for = request.headers.get("X-Forwarded-For", "")
+        if forwarded_for:
+            # Last entry is the IP added by the nearest trusted proxy
+            client_ip = forwarded_for.split(",")[-1].strip()
+        else:
+            client_ip = request.headers.get("X-Real-IP", "").strip()
+        if not client_ip:
+            client_ip = request.client.host if request.client else "unknown"
         if hasattr(self.tenant_manager, 'rate_limiter') and self.tenant_manager.rate_limiter:
             if self.tenant_manager.rate_limiter.is_locked_out(client_ip):
                 return JSONResponse(status_code=429, content={
@@ -121,10 +130,10 @@ class TenantMiddleware(BaseHTTPMiddleware):
                 "message": "API key not recognized"})
 
         if not tenant.is_active:
+            logger.warning("Inactive tenant access attempt: tenant_id=%s status=%s", tenant.tenant_id, tenant.status.value)
             return JSONResponse(status_code=403, content={
-                "error": "tenant_inactive",
-                "message": f"Tenant is {tenant.status.value}",
-                "tenant_id": tenant.tenant_id})
+                "error": "forbidden",
+                "message": "API key not authorized"})
 
         # Set tenant context
         set_current_tenant(tenant.tenant_id)

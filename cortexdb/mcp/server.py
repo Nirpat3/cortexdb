@@ -24,10 +24,13 @@ Tools:
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger("cortexdb.mcp")
+
+_COLLECTION_RE = re.compile(r'^[a-zA-Z0-9_-]+$')
 
 
 @dataclass
@@ -415,10 +418,13 @@ class CortexMCPServer:
                 if not self.db.rag:
                     return MCPToolResult(is_error=True,
                                         error_message="RAG pipeline not initialized")
+                collection = args.get("collection", "documents")
+                if not _COLLECTION_RE.match(collection):
+                    return MCPToolResult(is_error=True, error_message="Invalid collection name. Must match ^[a-zA-Z0-9_-]+$")
                 result = await self.db.rag.ingest(
                     text=args["text"],
                     doc_id=args["doc_id"],
-                    collection=args.get("collection", "documents"),
+                    collection=collection,
                     metadata=args.get("metadata"),
                     tenant_id=args.get("tenant_id"),
                 )
@@ -428,9 +434,12 @@ class CortexMCPServer:
                 if not self.db.rag:
                     return MCPToolResult(is_error=True,
                                         error_message="RAG pipeline not initialized")
+                collection = args.get("collection", "documents")
+                if not _COLLECTION_RE.match(collection):
+                    return MCPToolResult(is_error=True, error_message="Invalid collection name. Must match ^[a-zA-Z0-9_-]+$")
                 result = await self.db.rag.retrieve_with_context(
                     query=args["query"],
-                    collection=args.get("collection", "documents"),
+                    collection=collection,
                     limit=int(args.get("limit", 5)),
                     threshold=float(args.get("threshold", 0.75)),
                     max_tokens=int(args.get("max_tokens", 4000)),
@@ -443,9 +452,12 @@ class CortexMCPServer:
                 if not self.db.rag:
                     return MCPToolResult(is_error=True,
                                         error_message="RAG pipeline not initialized")
+                collection = args.get("collection", "documents")
+                if not _COLLECTION_RE.match(collection):
+                    return MCPToolResult(is_error=True, error_message="Invalid collection name. Must match ^[a-zA-Z0-9_-]+$")
                 result = await self.db.rag.smart_retrieve(
                     query=args["query"],
-                    collection=args.get("collection", "documents"),
+                    collection=collection,
                     limit=int(args.get("limit", 5)),
                     threshold=float(args.get("threshold", 0.75)),
                     tenant_id=args.get("tenant_id"),
@@ -454,8 +466,8 @@ class CortexMCPServer:
                 return MCPToolResult(content=result)
 
         except Exception as e:
-            logger.error(f"MCP tool error [{tool_name}]: {e}")
-            return MCPToolResult(is_error=True, error_message=str(e))
+            logger.error(f"MCP tool error [{tool_name}]: {e}", exc_info=True)
+            return MCPToolResult(is_error=True, error_message="Internal error")
 
     def register_cortexgraph_tools(self, insights):
         """Register CortexGraph MCP tools from the insights engine."""
@@ -499,13 +511,13 @@ class CortexMCPServer:
 
             return MCPToolResult(is_error=True, error_message=f"Unknown CortexGraph tool: {tool_name}")
         except Exception as e:
-            logger.error(f"CortexGraph MCP tool error [{tool_name}]: {e}")
-            return MCPToolResult(is_error=True, error_message=str(e))
+            logger.error(f"CortexGraph MCP tool error [{tool_name}]: {e}", exc_info=True)
+            return MCPToolResult(is_error=True, error_message="Internal error")
 
     def get_server_info(self) -> Dict:
         return {
             "name": "cortexdb",
-            "version": "3.0.0",
+            "version": "6.1.0",
             "protocol": "MCP",
             "tools_count": len(self._tools),
             "capabilities": ["query", "write", "health", "blocks", "agents",
