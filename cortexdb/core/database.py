@@ -182,17 +182,22 @@ class ReadCascade:
 
         # R0: Process-Local LRU Cache (lock-protected to prevent concurrent corruption)
         r0_key = f"{cache_prefix}{qhash}"
+        import copy
         async with self._r0_lock:
             if r0_key in self._r0_cache:
                 self._r0_cache.move_to_end(r0_key)
                 self._r0_hits += 1
-                data = self._r0_cache[r0_key]
-        if r0_key in self._r0_cache:
+                data = copy.deepcopy(self._r0_cache[r0_key])
+                r0_hit = True
+            else:
+                r0_hit = False
+                self._r0_misses += 1
+
+        if r0_hit:
             result = QueryResult(data=data, tier_served=CacheTier.R0_PROCESS,
                                  engines_hit=["r0_cache"],
                                  latency_ms=(time.perf_counter() - start) * 1000, cache_hit=True)
             return self._post_read(result, query, tenant_id)
-        self._r0_misses += 1
 
         # R1: MemoryCore / Redis
         if "memory" in self.engines:
@@ -201,7 +206,7 @@ class ReadCascade:
                 cached = await self.engines["memory"].get(redis_key)
                 if cached:
                     data = json.loads(cached)
-                    self._r0_set(r0_key, data)
+                    await self._r0_set(r0_key, data)
                     self._r1_hits += 1
                     result = QueryResult(data=data, tier_served=CacheTier.R1_MEMORY,
                                          engines_hit=["memory_core"],
@@ -225,7 +230,7 @@ class ReadCascade:
                     if similar:
                         data = similar[0]["payload"]["response"]
                         await self._promote_to_r1(f"{cache_prefix}cache:{qhash}", data)
-                        self._r0_set(r0_key, data)
+                        await self._r0_set(r0_key, data)
                         self._r2_hits += 1
                         result = QueryResult(data=data, tier_served=CacheTier.R2_SEMANTIC,
                                              engines_hit=["vector_core"],
@@ -275,7 +280,7 @@ class ReadCascade:
 
                 if data is not None:
                     await self._promote_to_r1(f"{cache_prefix}cache:{qhash}", data, ttl=3600)
-                    self._r0_set(r0_key, data)
+                    await self._r0_set(r0_key, data)
                     self._r3_hits += 1
                     result = QueryResult(data=data, tier_served=CacheTier.R3_PERSISTENT,
                                          engines_hit=["relational_core"],
@@ -356,8 +361,8 @@ class ReadCascade:
             return decrypted
         return data
 
-    def _r0_set(self, key: str, value: Any):
-        """Add to R0 cache. Caller should hold _r0_lock in async context."""
+    async def _r0_set(self, key: str, value: Any):
+        """Add to R0 cache. Acquires _r0_lock internally."""
         # Size guard: skip caching entries larger than 1MB
         try:
             entry_size = len(json.dumps(value, default=str))
@@ -366,13 +371,14 @@ class ReadCascade:
         except (TypeError, ValueError):
             pass
 
-        # LRU eviction: remove least recently used (front of OrderedDict)
-        while len(self._r0_cache) >= self._r0_max_size:
-            self._r0_cache.popitem(last=False)
-
-        # Store a copy to prevent callers from mutating cached data
         import copy
-        self._r0_cache[key] = copy.deepcopy(value)
+        async with self._r0_lock:
+            # LRU eviction: remove least recently used (front of OrderedDict)
+            while len(self._r0_cache) >= self._r0_max_size:
+                self._r0_cache.popitem(last=False)
+
+            # Store a copy to prevent callers from mutating cached data
+            self._r0_cache[key] = copy.deepcopy(value)
 
     def invalidate_tenant_cache(self, tenant_id: str):
         """Evict all R0 cache entries for a specific tenant after writes."""

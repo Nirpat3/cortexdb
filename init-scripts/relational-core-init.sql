@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS tenants (
     status VARCHAR(20) DEFAULT 'onboarding' CHECK (status IN ('onboarding','active','suspended','offboarding','purged')),
     api_key_hash VARCHAR(64) UNIQUE,
     api_key_salt VARCHAR(32) DEFAULT '',
+    api_key_prefix VARCHAR(8) DEFAULT '',
     config JSONB DEFAULT '{}',
     rate_limits JSONB DEFAULT '{}',
     metadata JSONB DEFAULT '{}',
@@ -31,6 +32,7 @@ CREATE TABLE IF NOT EXISTS tenants (
 
 CREATE INDEX idx_tenants_status ON tenants(status);
 CREATE INDEX idx_tenants_api_key ON tenants(api_key_hash);
+CREATE INDEX idx_tenants_api_key_prefix ON tenants(api_key_prefix);
 
 -- ================================================
 -- A2A: Agent-to-Agent Protocol (DOC-017/018 G19)

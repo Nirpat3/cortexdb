@@ -146,19 +146,26 @@ class HybridSearch:
 
             # Use plainto_tsquery for safe query parsing — handles special
             # characters, operators, and multi-word phrases without syntax errors.
-            # Build query with optional tenant filter
+            # Build query with tenant and collection filtering
             sql = """
-                SELECT chunk_id, content, doc_id, chunk_index, metadata,
-                       ts_rank_cd(to_tsvector('english', content),
+                SELECT c.chunk_id, c.content, c.doc_id, c.chunk_index, c.metadata,
+                       ts_rank_cd(to_tsvector('english', c.content),
                                   plainto_tsquery('english', $1)) AS rank
-                FROM rag_chunks
-                WHERE to_tsvector('english', content) @@ plainto_tsquery('english', $1)
+                FROM rag_chunks c
+                JOIN rag_documents d ON c.doc_id = d.doc_id
+                WHERE to_tsvector('english', c.content) @@ plainto_tsquery('english', $1)
             """
             params = [query[:500]]  # Cap raw query length for safety
 
             if tenant_id:
-                sql += " AND tenant_id = $2"
+                param_idx = len(params) + 1
+                sql += f" AND c.tenant_id = ${param_idx}"
                 params.append(tenant_id)
+
+            if collection:
+                param_idx = len(params) + 1
+                sql += f" AND d.collection = ${param_idx}"
+                params.append(collection)
 
             # Parameterized LIMIT to avoid SQL injection patterns
             param_idx = len(params) + 1

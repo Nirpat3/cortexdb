@@ -46,6 +46,7 @@ class Tenant:
     status: TenantStatus = TenantStatus.ONBOARDING
     api_key_hash: str = ""
     api_key_salt: str = ""
+    api_key_prefix: str = ""
     config: Dict = field(default_factory=dict)
     rate_limits: Dict = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
@@ -72,7 +73,7 @@ class TenantManager:
     def __init__(self, engines: Dict[str, Any] = None):
         self.engines = engines or {}
         self._tenants: Dict[str, Tenant] = {}
-        self._api_key_index: Dict[str, str] = {}  # api_key_hash -> tenant_id
+        self._api_key_index: Dict[str, List[str]] = {}  # api_key_prefix -> [tenant_ids]
 
     async def load_from_db(self):
         """Load all tenants from PostgreSQL into the in-memory cache.
@@ -86,7 +87,7 @@ class TenantManager:
         try:
             rows = await self.engines["relational"].execute(
                 "SELECT tenant_id, name, plan, status, api_key_hash, api_key_salt, "
-                "config, rate_limits, metadata, "
+                "api_key_prefix, config, rate_limits, metadata, "
                 "EXTRACT(EPOCH FROM created_at) AS created_epoch, "
                 "EXTRACT(EPOCH FROM activated_at) AS activated_epoch "
                 "FROM tenants WHERE status != 'purged'", None)
@@ -114,6 +115,7 @@ class TenantManager:
                     status=status,
                     api_key_hash=row.get("api_key_hash", ""),
                     api_key_salt=row.get("api_key_salt", ""),
+                    api_key_prefix=row.get("api_key_prefix", ""),
                     config=config,
                     rate_limits=rate_limits,
                     created_at=float(row["created_epoch"]) if row.get("created_epoch") else time.time(),
@@ -121,8 +123,8 @@ class TenantManager:
                     metadata=metadata,
                 )
                 self._tenants[tenant.tenant_id] = tenant
-                if tenant.api_key_hash:
-                    self._api_key_index[tenant.api_key_hash] = tenant.tenant_id
+                if tenant.api_key_prefix:
+                    self._api_key_index.setdefault(tenant.api_key_prefix, []).append(tenant.tenant_id)
 
             logger.info(f"Loaded {len(rows or [])} tenants from PostgreSQL")
         except Exception as e:
@@ -150,11 +152,13 @@ class TenantManager:
         api_key = self._generate_api_key()
         api_key_salt = self._generate_salt()
         api_key_hash = self._hash_api_key(api_key, api_key_salt)
+        api_key_prefix = api_key[:8]
 
         tenant = Tenant(
             tenant_id=tenant_id, name=name, plan=plan,
             api_key_hash=api_key_hash,
             api_key_salt=api_key_salt,
+            api_key_prefix=api_key_prefix,
             config=config or {},
             rate_limits=PLAN_RATE_LIMITS.get(plan, {}),
         )
@@ -165,17 +169,17 @@ class TenantManager:
         if "relational" in self.engines:
             try:
                 await self.engines["relational"].execute(
-                    "INSERT INTO tenants (tenant_id, name, plan, status, api_key_hash, api_key_salt, config) "
-                    "VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    "INSERT INTO tenants (tenant_id, name, plan, status, api_key_hash, api_key_salt, api_key_prefix, config) "
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
                     [tenant_id, name, plan.value, "onboarding", api_key_hash,
-                     api_key_salt, json_dumps(config or {})])
+                     api_key_salt, api_key_prefix, json_dumps(config or {})])
             except Exception as e:
                 logger.error(f"Failed to persist tenant to DB: {e}")
                 raise
 
         # Step 2: Update in-memory cache
         self._tenants[tenant_id] = tenant
-        self._api_key_index[api_key_hash] = tenant_id
+        self._api_key_index.setdefault(api_key_prefix, []).append(tenant_id)
 
         # Step 3: Create tenant-specific resources
         await self._create_tenant_resources(tenant)
@@ -301,19 +305,29 @@ class TenantManager:
         # Persist purge status to PG, then update in-memory cache
         await self._update_tenant_status(tenant_id, "purged")
         tenant.status = TenantStatus.PURGED
-        self._api_key_index.pop(tenant.api_key_hash, None)
+        if tenant.api_key_prefix in self._api_key_index:
+            try:
+                self._api_key_index[tenant.api_key_prefix].remove(tenant_id)
+            except ValueError:
+                pass
+            if not self._api_key_index[tenant.api_key_prefix]:
+                del self._api_key_index[tenant.api_key_prefix]
         purged["status"] = "purged"
         logger.info(f"Tenant purged: {tenant_id}")
         return purged
 
     def resolve_tenant(self, api_key: str) -> Optional[Tenant]:
-        """Resolve API key to tenant. Checks salted hash for each tenant."""
-        for tenant in self._tenants.values():
-            if not tenant.api_key_hash:
-                continue
-            key_hash = self._hash_api_key(api_key, tenant.api_key_salt)
-            if key_hash == tenant.api_key_hash:
-                return tenant
+        """Resolve API key to tenant using prefix index for O(1) average lookup."""
+        prefix = api_key[:8]
+        candidate_ids = self._api_key_index.get(prefix)
+        if not candidate_ids:
+            return None
+        for tenant_id in candidate_ids:
+            tenant = self._tenants.get(tenant_id)
+            if tenant and tenant.api_key_hash:
+                key_hash = self._hash_api_key(api_key, tenant.api_key_salt)
+                if key_hash == tenant.api_key_hash:
+                    return tenant
         return None
 
     def get_tenant(self, tenant_id: str) -> Optional[Tenant]:

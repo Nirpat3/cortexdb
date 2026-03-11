@@ -220,8 +220,12 @@ MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024  # 10 MB
 class _RequestSizeLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         content_length = request.headers.get("content-length")
-        if content_length and int(content_length) > MAX_REQUEST_BODY_BYTES:
-            return Response("Request body too large", status_code=413)
+        if content_length:
+            try:
+                if int(content_length) > MAX_REQUEST_BODY_BYTES:
+                    return Response("Request body too large", status_code=413)
+            except ValueError:
+                return Response("Invalid Content-Length header", status_code=400)
         return await call_next(request)
 
 
@@ -433,21 +437,11 @@ async def health_metrics():
 # -- Admin Endpoints --
 
 def _require_admin(request):
-    """Verify admin access via X-Admin-Token header (HMAC-verified).
-
-    Falls back to checking the authenticated tenant_id from middleware.
-    Never relies solely on a trivially-spoofable header value.
-    """
+    """Verify admin access via X-Admin-Token header (HMAC-verified)."""
     from starlette.responses import JSONResponse
-    # Primary: check X-Admin-Token against configured admin token
     admin_token = os.environ.get("CORTEX_ADMIN_TOKEN", "")
     provided = request.headers.get("X-Admin-Token", "")
     if admin_token and provided and secrets.compare_digest(provided, admin_token):
-        return None
-    # Fallback: check middleware-authenticated tenant_id
-    tid = getattr(request.state, "tenant_id", None) or request.headers.get("X-Tenant-ID", "")
-    if tid == "__admin__" and admin_token and secrets.compare_digest(
-            request.headers.get("X-Admin-Token", ""), admin_token):
         return None
     return JSONResponse({"error": "admin authentication required"}, status_code=403)
 
@@ -571,17 +565,23 @@ async def get_cache_config(request: Request):
 # -- Tenant Endpoints (DOC-019 Section 6) --
 
 @app.post("/v1/admin/tenants")
-async def tenant_onboard(req: TenantOnboardRequest):
+async def tenant_onboard(req: TenantOnboardRequest, request: Request):
+    denied = _require_admin(request)
+    if denied: return denied
     plan = TenantPlan(req.plan) if req.plan in [p.value for p in TenantPlan] else TenantPlan.FREE
     result = await tenant_mgr.onboard(req.tenant_id, req.name, plan, req.config)
     return result
 
 @app.get("/v1/admin/tenants")
-async def tenant_list(status: Optional[str] = None):
+async def tenant_list(request: Request, status: Optional[str] = None):
+    denied = _require_admin(request)
+    if denied: return denied
     return {"tenants": tenant_mgr.list_tenants(status) if tenant_mgr else []}
 
 @app.get("/v1/admin/tenants/{tenant_id}")
-async def tenant_get(tenant_id: str):
+async def tenant_get(tenant_id: str, request: Request):
+    denied = _require_admin(request)
+    if denied: return denied
     tenant = tenant_mgr.get_tenant(tenant_id) if tenant_mgr else None
     if not tenant:
         raise HTTPException(404, "Tenant not found")
@@ -590,30 +590,42 @@ async def tenant_get(tenant_id: str):
             "rate_limits": tenant.effective_rate_limits}
 
 @app.post("/v1/admin/tenants/{tenant_id}/activate")
-async def tenant_activate(tenant_id: str):
+async def tenant_activate(tenant_id: str, request: Request):
+    denied = _require_admin(request)
+    if denied: return denied
     await tenant_mgr.activate(tenant_id)
     return {"status": "activated"}
 
 @app.post("/v1/admin/tenants/{tenant_id}/suspend")
-async def tenant_suspend(tenant_id: str, reason: str = ""):
+async def tenant_suspend(tenant_id: str, request: Request, reason: str = ""):
+    denied = _require_admin(request)
+    if denied: return denied
     await tenant_mgr.suspend(tenant_id, reason)
     return {"status": "suspended"}
 
 @app.post("/v1/admin/tenants/{tenant_id}/deactivate")
-async def tenant_deactivate(tenant_id: str):
+async def tenant_deactivate(tenant_id: str, request: Request):
+    denied = _require_admin(request)
+    if denied: return denied
     await tenant_mgr.deactivate(tenant_id)
     return {"status": "offboarding"}
 
 @app.post("/v1/admin/tenants/{tenant_id}/export")
-async def tenant_export(tenant_id: str):
+async def tenant_export(tenant_id: str, request: Request):
+    denied = _require_admin(request)
+    if denied: return denied
     return await tenant_mgr.export_data(tenant_id)
 
 @app.post("/v1/admin/tenants/{tenant_id}/purge")
-async def tenant_purge(tenant_id: str):
+async def tenant_purge(tenant_id: str, request: Request):
+    denied = _require_admin(request)
+    if denied: return denied
     return await tenant_mgr.purge(tenant_id)
 
 @app.get("/v1/admin/tenants/{tenant_id}/isolation")
-async def tenant_isolation_report(tenant_id: str):
+async def tenant_isolation_report(tenant_id: str, request: Request):
+    denied = _require_admin(request)
+    if denied: return denied
     if db and db.tenant_isolation:
         return await db.tenant_isolation.isolation_report(tenant_id)
     return {"error": "Tenant isolation not initialized"}
@@ -902,8 +914,9 @@ async def cg_attribution(campaign_id: str, request: Request):
 @app.post("/v1/cortexgraph/merge")
 async def cg_merge(req: MergeCustomersRequest, request: Request):
     """Merge two customer records."""
+    tid = _tenant_id(request)
     result = await identity_resolver.merge(
-        req.canonical_id, req.duplicate_id, req.reason)
+        req.canonical_id, req.duplicate_id, req.reason, tenant_id=tid)
     return result
 
 @app.get("/v1/cortexgraph/stats")
@@ -935,18 +948,24 @@ async def bridge_query(req: BridgeQueryRequest):
 # -- Scale: Sharding Endpoints (Citus) --
 
 @app.post("/v1/admin/sharding/initialize")
-async def sharding_init():
+async def sharding_init(request: Request):
     """Initialize Citus extension and sharding configuration."""
+    denied = _require_admin(request)
+    if denied: return denied
     return await shard_mgr.initialize() if shard_mgr else {"error": "not available"}
 
 @app.post("/v1/admin/sharding/distribute")
-async def sharding_distribute():
+async def sharding_distribute(request: Request):
     """Distribute all tables across Citus workers."""
+    denied = _require_admin(request)
+    if denied: return denied
     return await shard_mgr.distribute_tables() if shard_mgr else {"error": "not available"}
 
 @app.post("/v1/admin/sharding/add-worker")
-async def sharding_add_worker(host: str, port: int = 5432):
+async def sharding_add_worker(request: Request, host: str, port: int = 5432):
     """Add a Citus worker node."""
+    denied = _require_admin(request)
+    if denied: return denied
     import re
     if not re.match(r'^[a-zA-Z0-9._-]+$', host) or len(host) > 253:
         raise HTTPException(400, "Invalid hostname format")
@@ -955,8 +974,10 @@ async def sharding_add_worker(host: str, port: int = 5432):
     return await shard_mgr.add_worker(host, port) if shard_mgr else {"error": "not available"}
 
 @app.post("/v1/admin/sharding/remove-worker")
-async def sharding_remove_worker(host: str, port: int = 5432):
+async def sharding_remove_worker(request: Request, host: str, port: int = 5432):
     """Remove a Citus worker node (drains shards first)."""
+    denied = _require_admin(request)
+    if denied: return denied
     import re
     if not re.match(r'^[a-zA-Z0-9._-]+$', host) or len(host) > 253:
         raise HTTPException(400, "Invalid hostname format")
@@ -965,8 +986,10 @@ async def sharding_remove_worker(host: str, port: int = 5432):
     return await shard_mgr.remove_worker(host, port) if shard_mgr else {"error": "not available"}
 
 @app.post("/v1/admin/sharding/rebalance")
-async def sharding_rebalance():
+async def sharding_rebalance(request: Request):
     """Rebalance shards across workers."""
+    denied = _require_admin(request)
+    if denied: return denied
     if not shard_mgr:
         return {"error": "not available"}
     result = await shard_mgr.rebalance()
@@ -974,55 +997,73 @@ async def sharding_rebalance():
             "duration_ms": result.duration_ms}
 
 @app.get("/v1/admin/sharding/stats")
-async def sharding_stats():
+async def sharding_stats(request: Request):
     """Get shard distribution statistics."""
+    denied = _require_admin(request)
+    if denied: return denied
     return await shard_mgr.get_shard_stats() if shard_mgr else {}
 
 @app.get("/v1/admin/sharding/tenant-placement/{tenant_id}")
-async def sharding_tenant_placement(tenant_id: str):
+async def sharding_tenant_placement(tenant_id: str, request: Request):
     """Find which worker hosts a tenant's data."""
+    denied = _require_admin(request)
+    if denied: return denied
     return await shard_mgr.get_tenant_placement(tenant_id) if shard_mgr else {}
 
 @app.post("/v1/admin/sharding/isolate-tenant/{tenant_id}")
-async def sharding_isolate_tenant(tenant_id: str):
+async def sharding_isolate_tenant(tenant_id: str, request: Request):
     """Isolate a premium tenant onto dedicated shard."""
+    denied = _require_admin(request)
+    if denied: return denied
     return await shard_mgr.isolate_tenant(tenant_id) if shard_mgr else {}
 
 @app.post("/v1/admin/sharding/columnar/{table_name}")
-async def sharding_enable_columnar(table_name: str):
+async def sharding_enable_columnar(table_name: str, request: Request):
     """Convert a table to Citus columnar storage for analytics."""
+    denied = _require_admin(request)
+    if denied: return denied
     return await shard_mgr.enable_columnar(table_name) if shard_mgr else {}
 
 
 # -- Scale: Replica Routing Endpoints --
 
 @app.get("/v1/admin/replicas/stats")
-async def replica_stats():
+async def replica_stats(request: Request):
     """Get read replica routing statistics."""
+    denied = _require_admin(request)
+    if denied: return denied
     return replica_router.get_stats() if replica_router else {}
 
 @app.get("/v1/admin/replicas/lag")
-async def replica_lag():
+async def replica_lag(request: Request):
     """Check replication lag on all replicas."""
+    denied = _require_admin(request)
+    if denied: return denied
     return await replica_router.check_replica_lag() if replica_router else []
 
 @app.get("/v1/admin/replicas/pool")
-async def replica_pool_stats():
+async def replica_pool_stats(request: Request):
     """Get connection pool statistics."""
+    denied = _require_admin(request)
+    if denied: return denied
     return await replica_router.get_pool_stats() if replica_router else {}
 
 
 # -- Scale: AI Index Management Endpoints --
 
 @app.get("/v1/admin/indexes/slow-queries")
-async def index_slow_queries(limit: int = 50):
+async def index_slow_queries(request: Request, limit: int = 50):
     """Analyze slow queries for index recommendations."""
+    denied = _require_admin(request)
+    if denied: return denied
     limit = max(1, min(limit, 200))
     return await ai_index.analyze_slow_queries(limit) if ai_index else []
 
 @app.get("/v1/admin/indexes/recommend")
-async def index_recommend():
+async def index_recommend(request: Request):
     """Get AI-powered index recommendations."""
+    denied = _require_admin(request)
+    if denied: return denied
     recs = await ai_index.recommend() if ai_index else []
     return {"recommendations": [
         {"table": r.table, "columns": r.columns, "type": r.index_type.value,
@@ -1031,44 +1072,58 @@ async def index_recommend():
     ]}
 
 @app.post("/v1/admin/indexes/create")
-async def index_create(concurrently: bool = True):
+async def index_create(request: Request, concurrently: bool = True):
     """Create recommended indexes (CONCURRENTLY = no locks)."""
+    denied = _require_admin(request)
+    if denied: return denied
     if not ai_index:
         return {"error": "not available"}
     await ai_index.recommend()  # Ensure recommendations are fresh
     return await ai_index.create_optimal(concurrently=concurrently)
 
 @app.post("/v1/admin/indexes/tune-vector")
-async def index_tune_vector(collection: Optional[str] = None):
+async def index_tune_vector(request: Request, collection: Optional[str] = None):
     """Auto-tune HNSW/IVF vector index parameters."""
+    denied = _require_admin(request)
+    if denied: return denied
     return await ai_index.tune_vector_indexes(collection) if ai_index else {}
 
 @app.post("/v1/admin/indexes/garbage-collect")
-async def index_gc():
+async def index_gc(request: Request):
     """Find unused and duplicate indexes."""
+    denied = _require_admin(request)
+    if denied: return denied
     return await ai_index.garbage_collect() if ai_index else {}
 
 @app.get("/v1/admin/indexes/stats")
-async def index_stats():
+async def index_stats(request: Request):
     """AI index manager statistics."""
+    denied = _require_admin(request)
+    if denied: return denied
     return ai_index.get_stats() if ai_index else {}
 
 
 # -- Scale: Data Rendering Endpoints --
 
 @app.post("/v1/admin/views/setup")
-async def views_setup():
+async def views_setup(request: Request):
     """Create all CortexDB materialized views."""
+    denied = _require_admin(request)
+    if denied: return denied
     return await data_renderer.setup_materialized_views() if data_renderer else {}
 
 @app.post("/v1/admin/views/refresh")
-async def views_refresh(force: bool = False):
+async def views_refresh(request: Request, force: bool = False):
     """Refresh stale materialized views."""
+    denied = _require_admin(request)
+    if denied: return denied
     return await data_renderer.refresh_views(force) if data_renderer else {}
 
 @app.get("/v1/admin/views/stats")
-async def views_stats():
+async def views_stats(request: Request):
     """Get materialized view statistics."""
+    denied = _require_admin(request)
+    if denied: return denied
     return await data_renderer.get_view_stats() if data_renderer else []
 
 @app.get("/v1/admin/rendering/stats")
@@ -1131,10 +1186,8 @@ async def encryption_classification(table: str):
 @app.post("/v1/compliance/encryption/rotate-keys")
 async def encryption_rotate(request: Request):
     """Rotate encryption keys that are due. Requires admin auth."""
-    # Require admin authentication
-    tid = getattr(request.state, "tenant_id", None)
-    if tid != "__admin__":
-        raise HTTPException(403, {"error": "forbidden", "message": "Admin access required"})
+    denied = _require_admin(request)
+    if denied: return denied
     if not field_encryption:
         return {"error": "not available"}
     due = field_encryption.key_manager.check_rotation_needed()
@@ -1206,7 +1259,11 @@ async def audit_log_stats():
 async def rag_hybrid_search(request: Request, body: dict):
     """Hybrid search: dense vectors + BM25 sparse + optional re-ranking."""
     from fastapi.responses import JSONResponse
+    if "query" not in body:
+        raise HTTPException(422, "Required field: query")
     tid = _tenant_id(request)
+    if not db:
+        return JSONResponse(status_code=503, content={"error": "Database not initialized"})
     if not db.hybrid_search:
         return JSONResponse(status_code=503, content={"error": "Hybrid search not available"})
     results = await db.hybrid_search.search(
@@ -1247,11 +1304,14 @@ def _get_stress_engine():
 
 @app.post("/v1/admin/benchmark/run")
 async def run_benchmark(
+    request: Request,
     suite: str = "quick",
     concurrency: int = 10,
     iterations: int = 1000,
 ):
     """Run built-in benchmark suite. suite: 'quick' or 'full'."""
+    denied = _require_admin(request)
+    if denied: return denied
     from cortexdb.benchmark.scenarios import ScenarioRegistry
     registry = ScenarioRegistry(db=db, engines={})
     scenarios = registry.get_quick_scenarios() if suite == "quick" else registry.get_all_scenarios()
@@ -1263,19 +1323,24 @@ async def run_benchmark(
 
 
 @app.get("/v1/admin/benchmark/results")
-async def benchmark_results():
+async def benchmark_results(request: Request):
     """Get results from the last benchmark run."""
+    denied = _require_admin(request)
+    if denied: return denied
     return _get_bench_runner().get_results()
 
 
 @app.post("/v1/admin/benchmark/stress")
 async def run_stress_test(
+    request: Request,
     pattern: str = "ramp",
     duration_sec: int = 30,
     base_rps: int = 100,
     peak_rps: int = 500,
 ):
     """Run a stress test pattern (spike/soak/ramp/burst/mixed)."""
+    denied = _require_admin(request)
+    if denied: return denied
     stress = _get_stress_engine()
     if stress.is_running():
         return {"error": "Stress test already running"}
@@ -1394,8 +1459,10 @@ async def rag_delete(doc_id: str, request: Request):
 
 
 @app.post("/v1/admin/benchmark/stop")
-async def stop_benchmark():
+async def stop_benchmark(request: Request):
     """Stop any running benchmark or stress test."""
+    denied = _require_admin(request)
+    if denied: return denied
     if _bench_runner: _bench_runner.stop()
     if _stress_engine: _stress_engine.stop()
     return {"stopped": True}
