@@ -14,7 +14,10 @@ except ImportError:
 
 
 class GraphEngine(BaseEngine):
+    RECONNECT_ERRORS = (ConnectionError, TimeoutError, OSError)
+
     def __init__(self, config: Dict):
+        super().__init__()
         self.url = config.get("url", "postgresql://cortex:cortex_secret@localhost:5432/cortexdb")
         self.pool = None
 
@@ -38,6 +41,7 @@ class GraphEngine(BaseEngine):
                 "brain_region": "Association Cortex",
                 "nodes": nodes,
                 "links": links,
+                **self.reconnect_stats,
             }
 
     async def find_path(self, source_id: str, target_id: str,

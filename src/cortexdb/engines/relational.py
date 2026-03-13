@@ -13,8 +13,18 @@ except ImportError:
 
 
 class RelationalEngine(BaseEngine):
+    RECONNECT_ERRORS = (ConnectionError, TimeoutError, OSError)
+
     def __init__(self, config: Dict):
-        self.url = config.get("url", "postgresql://cortex:cortex_secret@localhost:5432/cortexdb")
+        super().__init__()
+        import os
+        self._use_uds = os.getenv("CORTEX_USE_UNIX_SOCKETS", "").lower() in ("true", "1")
+        if self._use_uds:
+            # Unix Domain Socket: ~15-30% latency reduction vs TCP loopback
+            uds_path = config.get("uds_path", "/tmp")
+            self.url = f"postgresql://cortex:cortex_secret@/{config.get('database', 'cortexdb')}?host={uds_path}"
+        else:
+            self.url = config.get("url", "postgresql://cortex:cortex_secret@localhost:5432/cortexdb")
         self.pool = None
 
     async def connect(self):
@@ -28,6 +38,24 @@ class RelationalEngine(BaseEngine):
         if self.pool:
             await self.pool.close()
 
+    async def _check_pool_health(self) -> bool:
+        """Probe the pool with SELECT 1. Recreate if dead."""
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.fetchval("SELECT 1")
+            return True
+        except Exception:
+            import logging
+            logging.getLogger("cortexdb.engines.relational").warning(
+                "Pool health check failed, recreating pool")
+            try:
+                if self.pool:
+                    await self.pool.close()
+            except Exception:
+                pass
+            await self.connect()
+            return False
+
     async def health(self) -> Dict:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow("SELECT NOW() as time, pg_database_size('cortexdb') as db_size")
@@ -38,15 +66,20 @@ class RelationalEngine(BaseEngine):
                 "server_time": str(row["time"]),
                 "db_size_mb": round(row["db_size"] / 1024 / 1024, 2),
                 "pool_size": pool_size,
+                **self.reconnect_stats,
             }
 
     async def execute(self, query: str, params: Optional[Dict] = None) -> Any:
-        async with self.pool.acquire() as conn:
-            if query.strip().upper().startswith(("SELECT", "WITH")):
-                rows = await conn.fetch(query, *(params.values() if params else []))
-                return [dict(r) for r in rows]
-            else:
-                return await conn.execute(query, *(params.values() if params else []))
+        async def _do_execute():
+            async with self.pool.acquire() as conn:
+                if query.strip().upper().startswith(("SELECT", "WITH")):
+                    rows = await conn.fetch(query, *(params.values() if params else []))
+                    return [dict(r) for r in rows]
+                else:
+                    return await conn.execute(query, *(params.values() if params else []))
+
+        return await self._with_reconnect(
+            "execute", _do_execute, reconnect_errors=self.RECONNECT_ERRORS)
 
     async def write(self, data_type: str, payload: Dict, actor: str = "system") -> Any:
         async with self.pool.acquire() as conn:

@@ -3,6 +3,7 @@
 Onboarding -> Active -> Offboarding with full data isolation.
 """
 
+import asyncio
 import hashlib
 import os
 import secrets
@@ -74,6 +75,11 @@ class TenantManager:
         self.engines = engines or {}
         self._tenants: Dict[str, Tenant] = {}
         self._api_key_index: Dict[str, List[str]] = {}  # api_key_prefix -> [tenant_ids]
+        # Hot-reload state
+        self._reload_task: Optional[asyncio.Task] = None
+        self._last_reload_at: Optional[float] = None
+        self._reload_interval: float = 60.0  # seconds
+        self._reload_count: int = 0
 
     async def load_from_db(self):
         """Load all tenants from PostgreSQL into the in-memory cache.
@@ -129,6 +135,118 @@ class TenantManager:
             logger.info(f"Loaded {len(rows or [])} tenants from PostgreSQL")
         except Exception as e:
             logger.error(f"Failed to load tenants from DB: {e}")
+
+    async def reload_from_db(self):
+        """Hot-reload tenants that changed since last reload.
+
+        Uses updated_at column to fetch only rows modified after the last
+        reload timestamp.  On first call (_last_reload_at is None) all
+        non-purged tenants are reloaded — equivalent to load_from_db().
+        """
+        if "relational" not in self.engines:
+            return
+
+        try:
+            if self._last_reload_at is not None:
+                rows = await self.engines["relational"].execute(
+                    "SELECT tenant_id, name, plan, status, api_key_hash, api_key_salt, "
+                    "api_key_prefix, config, rate_limits, metadata, "
+                    "EXTRACT(EPOCH FROM created_at) AS created_epoch, "
+                    "EXTRACT(EPOCH FROM activated_at) AS activated_epoch "
+                    "FROM tenants WHERE status != 'purged' "
+                    "AND updated_at > to_timestamp($1)",
+                    [self._last_reload_at])
+            else:
+                rows = await self.engines["relational"].execute(
+                    "SELECT tenant_id, name, plan, status, api_key_hash, api_key_salt, "
+                    "api_key_prefix, config, rate_limits, metadata, "
+                    "EXTRACT(EPOCH FROM created_at) AS created_epoch, "
+                    "EXTRACT(EPOCH FROM activated_at) AS activated_epoch "
+                    "FROM tenants WHERE status != 'purged'", None)
+
+            refreshed = 0
+            for row in (rows or []):
+                plan = TenantPlan(row["plan"])
+                status = TenantStatus(row["status"])
+                config = row.get("config") or {}
+                if isinstance(config, str):
+                    import json as _json
+                    config = _json.loads(config)
+                rate_limits = row.get("rate_limits") or {}
+                if isinstance(rate_limits, str):
+                    import json as _json
+                    rate_limits = _json.loads(rate_limits)
+                metadata = row.get("metadata") or {}
+                if isinstance(metadata, str):
+                    import json as _json
+                    metadata = _json.loads(metadata)
+
+                tid = row["tenant_id"]
+
+                # Remove old api_key_prefix index entry if tenant already cached
+                existing = self._tenants.get(tid)
+                if existing and existing.api_key_prefix and existing.api_key_prefix in self._api_key_index:
+                    try:
+                        self._api_key_index[existing.api_key_prefix].remove(tid)
+                    except ValueError:
+                        pass
+                    if not self._api_key_index[existing.api_key_prefix]:
+                        del self._api_key_index[existing.api_key_prefix]
+
+                tenant = Tenant(
+                    tenant_id=tid,
+                    name=row["name"],
+                    plan=plan,
+                    status=status,
+                    api_key_hash=row.get("api_key_hash", ""),
+                    api_key_salt=row.get("api_key_salt", ""),
+                    api_key_prefix=row.get("api_key_prefix", ""),
+                    config=config,
+                    rate_limits=rate_limits,
+                    created_at=float(row["created_epoch"]) if row.get("created_epoch") else time.time(),
+                    activated_at=float(row["activated_epoch"]) if row.get("activated_epoch") else None,
+                    metadata=metadata,
+                )
+                self._tenants[tid] = tenant
+                if tenant.api_key_prefix:
+                    self._api_key_index.setdefault(tenant.api_key_prefix, []).append(tid)
+                refreshed += 1
+
+            self._last_reload_at = time.time()
+            self._reload_count += 1
+            if refreshed:
+                logger.info(f"Hot-reload #{self._reload_count}: refreshed {refreshed} tenant(s)")
+            else:
+                logger.debug(f"Hot-reload #{self._reload_count}: no tenant changes")
+
+        except Exception as e:
+            logger.error(f"Hot-reload failed: {e}")
+
+    async def start_reload_task(self):
+        """Start periodic background task that hot-reloads tenants from DB."""
+        if self._reload_task is not None:
+            logger.warning("Reload task already running")
+            return
+
+        async def _loop():
+            while True:
+                await asyncio.sleep(self._reload_interval)
+                await self.reload_from_db()
+
+        self._reload_task = asyncio.create_task(_loop())
+        logger.info(f"Tenant hot-reload task started (interval={self._reload_interval}s)")
+
+    async def stop_reload_task(self):
+        """Cancel the periodic hot-reload background task."""
+        if self._reload_task is None:
+            return
+        self._reload_task.cancel()
+        try:
+            await self._reload_task
+        except asyncio.CancelledError:
+            pass
+        self._reload_task = None
+        logger.info("Tenant hot-reload task stopped")
 
     @staticmethod
     def _hash_api_key(api_key: str, salt: str = "") -> str:
@@ -362,7 +480,17 @@ class TenantManager:
         for t in self._tenants.values():
             by_plan[t.plan.value] = by_plan.get(t.plan.value, 0) + 1
             by_status[t.status.value] = by_status.get(t.status.value, 0) + 1
-        return {"total": len(self._tenants), "by_plan": by_plan, "by_status": by_status}
+        return {
+            "total": len(self._tenants),
+            "by_plan": by_plan,
+            "by_status": by_status,
+            "hot_reload": {
+                "enabled": self._reload_task is not None,
+                "interval_s": self._reload_interval,
+                "reload_count": self._reload_count,
+                "last_reload_at": self._last_reload_at,
+            },
+        }
 
 
 def json_dumps(obj):

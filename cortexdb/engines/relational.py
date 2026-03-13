@@ -44,13 +44,19 @@ class RelationalEngine(BaseEngine):
                 "pool_size": pool_size,
             }
 
-    async def execute(self, query: str, params: Optional[Dict] = None) -> Any:
+    async def execute(self, query: str, params=None) -> Any:
         async with self.pool.acquire() as conn:
+            if params is None:
+                args = []
+            elif isinstance(params, dict):
+                args = list(params.values())
+            else:
+                args = list(params)
             if query.strip().upper().startswith(("SELECT", "WITH")):
-                rows = await conn.fetch(query, *(params.values() if params else []))
+                rows = await conn.fetch(query, *args)
                 return [dict(r) for r in rows]
             else:
-                return await conn.execute(query, *(params.values() if params else []))
+                return await conn.execute(query, *args)
 
     async def write(self, data_type: str, payload: Dict, actor: str = "system") -> Any:
         async with self.pool.acquire() as conn:
@@ -90,6 +96,26 @@ class RelationalEngine(BaseEngine):
                     payload.get("grid_address"), payload.get("node_type", "service"),
                     payload.get("zone", "default"), payload.get("state", "HEALTHY"),
                     json.dumps(payload.get("metadata", {}))
+                )
+            elif data_type == "evaluation":
+                return await conn.fetchval(
+                    """INSERT INTO evaluations (agent_id, session_key, task_type, evaluator_id, quality, skills_demonstrated, gaps_exposed, feedback, scoring_model, scoring_prompt_hash)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id""",
+                    payload.get("agent_id"), payload.get("session_key"), payload.get("task_type"),
+                    payload.get("evaluator_id"), payload.get("quality"),
+                    json.dumps(payload.get("skills_demonstrated", [])),
+                    json.dumps(payload.get("gaps_exposed", [])),
+                    payload.get("feedback"), payload.get("scoring_model"),
+                    payload.get("scoring_prompt_hash")
+                )
+            elif data_type == "skill_transition":
+                return await conn.fetchval(
+                    """INSERT INTO skill_transitions (agent_id, skill_key, old_level, new_level, old_confidence, new_confidence, trigger)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id""",
+                    payload.get("agent_id"), payload.get("skill_key"),
+                    payload.get("old_level"), payload.get("new_level"),
+                    payload.get("old_confidence"), payload.get("new_confidence"),
+                    payload.get("trigger")
                 )
             elif data_type in ("payment", "default"):
                 return await conn.fetchval(

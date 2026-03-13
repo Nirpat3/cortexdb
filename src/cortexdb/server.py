@@ -18,6 +18,9 @@ from typing import Any, Dict, Optional, List
 from contextlib import asynccontextmanager
 
 from cortexdb.core.database import CortexDB
+from cortexdb.core.outbox_worker import OutboxWorker
+from cortexdb.core.watchdog import Watchdog
+from cortexdb.core.traffic_controller import TrafficController, TrafficControlMiddleware
 from cortexdb.grid import (NodeStateMachine, RepairEngine, GridGarbageCollector,
                             GridHealthScorer, GridCoroner, ResurrectionProtocol)
 from cortexdb.heartbeat import HeartbeatProtocol, HealthCheckRunner
@@ -62,6 +65,8 @@ from cortexdb.superadmin.agent_bus import AgentBus
 
 import json as _json_mod
 
+logger = logging.getLogger("cortexdb")
+
 class _JSONFormatter(logging.Formatter):
     """Structured JSON logging for production observability."""
     def format(self, record):
@@ -86,6 +91,9 @@ else:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 
 db: Optional[CortexDB] = None
+outbox_worker: Optional[OutboxWorker] = None
+watchdog: Optional[Watchdog] = None
+traffic_ctrl: Optional[TrafficController] = None
 grid_sm: Optional[NodeStateMachine] = None
 repair_eng: Optional[RepairEngine] = None
 ggc: Optional[GridGarbageCollector] = None
@@ -173,7 +181,7 @@ _migrator = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global db, grid_sm, repair_eng, ggc, health_scorer
+    global db, outbox_worker, watchdog, traffic_ctrl, grid_sm, repair_eng, ggc, health_scorer
     global coroner, resurrection, heartbeat, circuits, health_runner, asa
     global tenant_mgr, rate_limiter, metrics, mcp_server, a2a_registry, a2a_protocol
     global identity_resolver, event_tracker, relationship_graph, profiler, cortexgraph
@@ -203,12 +211,33 @@ async def lifespan(app: FastAPI):
     global _migrator
     from cortexdb.core.migrator import Migrator
     auto_migrate = os.environ.get("CORTEXDB_AUTO_MIGRATE", "true").lower() in ("true", "1", "yes")
-    _migrator = Migrator(db.engines.get("relational").pool, auto_migrate=auto_migrate)
+    force_migrate = os.environ.get("CORTEXDB_FORCE_MIGRATE", "false").lower() in ("true", "1", "yes")
+    _migrator = Migrator(db.engines.get("relational").pool, auto_migrate=auto_migrate, force=force_migrate)
     await _migrator.run()
+
+    # OutboxWorker — crash-safe async write fan-out
+    rel_engine = db.engines.get("relational")
+    if rel_engine and rel_engine.pool:
+        outbox_worker = OutboxWorker(pool=rel_engine.pool, engines=db.engines, metrics=None)
+        await outbox_worker.start()
+        # Wire outbox pool into WriteFanOut so async writes go through outbox table
+        if db.write_fanout:
+            db.write_fanout._outbox_pool = rel_engine.pool
+        logger.info("OutboxWorker started with supervisor")
+    else:
+        logger.warning("OutboxWorker skipped — no relational engine pool available")
+
+    # Watchdog — monitors event loop latency, memory, circuit breakers, outbox health
+    watchdog = Watchdog(db=db, outbox_worker=outbox_worker, circuits=None)
+    await watchdog.start()
+
+    # Traffic Controller — health-driven request acceptance
+    traffic_ctrl = TrafficController(db=db, circuits=None)
+    app.state.traffic_controller = traffic_ctrl
 
     # Grid
     grid_sm = NodeStateMachine()
-    repair_eng = RepairEngine(grid_sm)
+    repair_eng = RepairEngine(grid_sm, db_pool=rel_engine.pool if rel_engine else None)
     ggc = GridGarbageCollector(grid_sm)
     health_scorer = GridHealthScorer()
     coroner = GridCoroner()
@@ -217,11 +246,17 @@ async def lifespan(app: FastAPI):
     # Heartbeat
     heartbeat = HeartbeatProtocol()
     circuits = CircuitBreakerRegistry()
+    if watchdog:
+        watchdog._circuits = circuits
+    if traffic_ctrl:
+        traffic_ctrl._circuits = circuits
     health_runner = HealthCheckRunner(db.engines)
     asa = ASAEnforcer()
 
     # Multi-Tenancy
     tenant_mgr = TenantManager(db.engines)
+    await tenant_mgr.reload_from_db()  # Initial load from DB
+    await tenant_mgr.start_reload_loop()  # Background delta reload every 60s
 
     # Rate Limiting — also bind to app.state for middleware late-binding
     rate_limiter = RateLimiter(db.engines.get("memory"))
@@ -600,6 +635,21 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(persistence_store.start_auto_save())
 
     await ggc.start()
+
+    # Resume incomplete repair sessions from DB
+    if repair_eng and repair_eng._db_pool:
+        try:
+            resumed = await repair_eng.resume_incomplete_sessions()
+            if resumed:
+                logger.info(f"Resumed {len(resumed)} incomplete repair sessions")
+        except Exception as e:
+            logger.warning(f"Failed to resume repair sessions: {e}")
+
+    # Start connection pool auto-scaling
+    if rel_engine and hasattr(rel_engine, 'pool') and hasattr(rel_engine.pool, 'start_auto_scaling'):
+        await rel_engine.pool.start_auto_scaling()
+        logger.info("Connection pool auto-scaling started")
+
     yield
 
     # ── Graceful shutdown with timeouts ──
@@ -611,6 +661,22 @@ async def lifespan(app: FastAPI):
     if persistence_store:
         persistence_store.stop()
         logger.info("SuperAdmin state persisted to disk")
+
+    # 0. Stop tenant hot-reload
+    if tenant_mgr:
+        await tenant_mgr.stop_reload_loop()
+
+    # 0a. Stop Watchdog
+    if watchdog:
+        await watchdog.stop()
+
+    # 0b. Stop OutboxWorker (drains in-flight dispatches)
+    if outbox_worker:
+        try:
+            await asyncio.wait_for(outbox_worker.stop(), timeout=15)
+            logger.info("OutboxWorker stopped")
+        except asyncio.TimeoutError:
+            logger.warning("OutboxWorker stop timeout")
 
     # 1. Drain pending async writes (30s max)
     if db and db.write_fanout:
@@ -655,6 +721,7 @@ app.add_middleware(CORSMiddleware, allow_origins=_cors_origins,
                    allow_headers=["Authorization", "Content-Type", "X-Tenant-Key", "X-Request-ID"])
 app.add_middleware(RateLimitMiddleware, rate_limiter=None)  # Wired in lifespan via app.state
 app.add_middleware(TenantMiddleware, tenant_manager=None)    # Wired in lifespan via app.state
+app.add_middleware(TrafficControlMiddleware)  # Uses app.state.traffic_controller (set in lifespan)
 
 
 # -- Global Exception Handler --
@@ -856,6 +923,22 @@ async def health_deep(request: Request):
     db_health["audit_trail"] = compliance_audit.get_stats() if compliance_audit else {}
     return db_health
 
+@app.get("/health/watchdog")
+async def health_watchdog():
+    """Watchdog status: event loop latency, memory, circuit breakers, outbox."""
+    if not watchdog:
+        return {"status": "not_initialized"}
+    return watchdog.get_status()
+
+
+@app.get("/health/degradation")
+async def health_degradation():
+    """Degraded mode status: whether CortexDB is in cache-only mode."""
+    if not db:
+        return {"status": "not_initialized"}
+    return db.degradation_status
+
+
 @app.get("/health/metrics")
 async def health_metrics(request: Request):
     """Prometheus-compatible metrics endpoint."""
@@ -988,6 +1071,16 @@ async def tenant_isolation_report(tenant_id: str, request: Request):
     if db and db.tenant_isolation:
         return await db.tenant_isolation.isolation_report(tenant_id)
     return {"error": "Tenant isolation not initialized"}
+
+
+@app.post("/v1/admin/tenants/reload")
+async def tenant_reload(request: Request):
+    """Trigger immediate tenant hot-reload from DB."""
+    _verify_admin(request)
+    if not tenant_mgr:
+        return {"error": "Tenant manager not initialized"}
+    updated = await tenant_mgr.reload_from_db()
+    return {"status": "reloaded", "tenants_updated": updated}
 
 
 # -- Convenience Endpoints --

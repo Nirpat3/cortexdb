@@ -10,12 +10,14 @@ Every query flows: Amygdala (< 1ms) -> Parser -> Router -> Cache Cascade -> Engi
 import asyncio
 import hashlib
 import json
+import re
 import time
 import logging
-from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
 from enum import Enum
+
+from cachetools import TTLCache
 
 logger = logging.getLogger("cortexdb")
 
@@ -58,9 +60,15 @@ class SecurityVerdict:
 
 
 class Amygdala:
-    """Security Engine - < 1ms threat detection on EVERY query."""
+    """Security Engine - < 1ms threat detection on EVERY query.
 
-    INJECTION_PATTERNS = [
+    v2: Alert-only for injection patterns (log + metric, don't reject).
+    Hard-block only: protected table DML, code execution, excessive anomalies.
+    Optional strict_mode: require parameterized queries (reject embedded values).
+    """
+
+    # Patterns that generate ALERTS but do NOT block
+    ALERT_PATTERNS = [
         "'; DROP TABLE", "1=1", "OR 1=1", "UNION SELECT",
         "'; DELETE FROM", "admin'--", "' OR ''='",
         "EXEC xp_", "EXECUTE sp_", "; SHUTDOWN",
@@ -74,6 +82,7 @@ class Amygdala:
         "PG_TABLES", "PG_CATALOG", "INFORMATION_SCHEMA",
     ]
 
+    # Operations that are ALWAYS blocked (code execution)
     BLOCKED_OPERATIONS = [
         "shell_exec", "os.system", "subprocess", "eval(",
         "exec(", "import os", "__import__", "cmd.exe",
@@ -84,69 +93,104 @@ class Amygdala:
         "COMPLIANCE_AUDIT_LOG", "IMMUTABLE_LEDGER", "EXPERIENCE_LEDGER",
     ]
 
-    def __init__(self):
-        self._pattern_set = set(p.upper() for p in self.INJECTION_PATTERNS)
+    # Regex to detect raw embedded values (for strict_mode)
+    _EMBEDDED_VALUE_RE = re.compile(
+        r"(?:=\s*'[^']+'"           # = 'value'
+        r"|=\s*\d{2,}"             # = 123
+        r"|IN\s*\([^$)]+\))"       # IN (1,2,3) without $params
+        , re.IGNORECASE
+    )
+
+    def __init__(self, strict_mode: bool = False):
+        self._alert_set = set(p.upper() for p in self.ALERT_PATTERNS)
         self._blocked_set = set(b.upper() for b in self.BLOCKED_OPERATIONS)
+        self._strict_mode = strict_mode
         self._checks_total = 0
         self._blocks_total = 0
+        self._alerts_total = 0
+
+    def _scan_patterns(self, query_upper: str) -> List[str]:
+        """Scan for injection patterns — returns alert-level findings."""
+        alerts = []
+        for pattern in self._alert_set:
+            if pattern in query_upper:
+                alerts.append(f"SQL_INJECTION: '{pattern}'")
+        return alerts
 
     def assess(self, query: str, actor: str = "anonymous") -> SecurityVerdict:
         start = time.perf_counter_ns()
         self._checks_total += 1
-        threats = []
+        hard_blocks = []
+        alerts = []
         query_upper = query.upper()
 
-        for pattern in self._pattern_set:
-            if pattern in query_upper:
-                threats.append(f"SQL_INJECTION: '{pattern}'")
+        # Alert-only: injection pattern scanning (log, don't block)
+        alerts = self._scan_patterns(query_upper)
 
+        # HARD BLOCK: code execution attempts
         for blocked in self._blocked_set:
             if blocked in query_upper:
-                threats.append(f"BLOCKED_OPERATION: '{blocked}'")
+                hard_blocks.append(f"BLOCKED_OPERATION: '{blocked}'")
 
-        # Block DML on protected (immutable/audit) tables
+        # HARD BLOCK: DML on protected (immutable/audit) tables
         for table in self.PROTECTED_TABLES:
             if table in query_upper:
                 for dml in ("UPDATE ", "DELETE ", "TRUNCATE ", "ALTER ", "DROP "):
                     if dml in query_upper:
-                        threats.append(f"PROTECTED_TABLE: {dml.strip()} on {table}")
+                        hard_blocks.append(f"PROTECTED_TABLE: {dml.strip()} on {table}")
 
+        # HARD BLOCK: excessive single-quote anomaly
         if query.count("'") > 10:
-            threats.append("ANOMALY: excessive single quotes")
-        if len(query) > 10000:
-            threats.append("ANOMALY: query exceeds 10KB")
+            hard_blocks.append("ANOMALY: excessive single quotes")
 
-        if threats:
+        # Alert only: oversized query
+        if len(query) > 10000:
+            alerts.append("ANOMALY: query exceeds 10KB")
+
+        # Strict mode: reject queries with raw embedded values (not parameterized)
+        if self._strict_mode and self._EMBEDDED_VALUE_RE.search(query):
+            hard_blocks.append("STRICT_MODE: query contains embedded values — use parameterized queries")
+
+        # Log alerts (don't block)
+        if alerts:
+            self._alerts_total += len(alerts)
+            logger.warning(f"Amygdala alert (actor={actor}): {alerts}")
+
+        if hard_blocks:
             self._blocks_total += 1
 
+        all_findings = hard_blocks + alerts
         elapsed_us = (time.perf_counter_ns() - start) / 1000
         return SecurityVerdict(
-            allowed=len(threats) == 0,
-            threat_score=min(1.0, len(threats) * 0.3),
-            threats_detected=threats,
+            allowed=len(hard_blocks) == 0,
+            threat_score=min(1.0, len(all_findings) * 0.3),
+            threats_detected=all_findings,
             latency_us=elapsed_us
         )
 
     @property
     def stats(self) -> Dict:
         return {"checks_total": self._checks_total, "blocks_total": self._blocks_total,
-                "patterns": len(self.INJECTION_PATTERNS)}
+                "alerts_total": self._alerts_total,
+                "patterns": len(self.ALERT_PATTERNS), "strict_mode": self._strict_mode}
 
 
 class ReadCascade:
     """5-Tier Read Cascade: R0 -> R1 -> R2 -> R3 -> R4. Target: 75-85% cache hit rate."""
 
-    def __init__(self, engines: Dict[str, Any], tenant_isolation=None):
+    def __init__(self, engines: Dict[str, Any], tenant_isolation=None,
+                 semantic_cache_config=None):
         self.engines = engines
         self.tenant_isolation = tenant_isolation
-        self._r0_cache: OrderedDict = OrderedDict()  # LRU cache
-        self._r0_max_size = 10000
+        self.semantic_cache_config = semantic_cache_config
+        self._r0_cache: TTLCache = TTLCache(maxsize=10000, ttl=300)
         self._r0_max_entry_bytes = 1024 * 1024  # 1MB max per entry
         self._r0_hits = 0
         self._r0_misses = 0
         self._r1_hits = 0
         self._r2_hits = 0
         self._r3_hits = 0
+        self._bloom = None  # Set externally after init
 
     def _query_hash(self, query: str, params: Optional[Dict] = None,
                     tenant_id: Optional[str] = None) -> str:
@@ -160,46 +204,60 @@ class ReadCascade:
         qhash = self._query_hash(query, params, tenant_id)
         cache_prefix = f"tenant:{tenant_id}:" if tenant_id else ""
 
-        # R0: Process-Local LRU Cache
+        # R0: Process-Local TTLCache (auto-evicts by TTL + maxsize)
         r0_key = f"{cache_prefix}{qhash}"
-        if r0_key in self._r0_cache:
-            # Move to end (most recently used) for LRU
-            self._r0_cache.move_to_end(r0_key)
+        r0_val = self._r0_cache.get(r0_key)
+        if r0_val is not None:
             self._r0_hits += 1
-            return QueryResult(data=self._r0_cache[r0_key], tier_served=CacheTier.R0_PROCESS,
+            return QueryResult(data=r0_val, tier_served=CacheTier.R0_PROCESS,
                                engines_hit=["r0_cache"],
                                latency_ms=(time.perf_counter() - start) * 1000, cache_hit=True)
         self._r0_misses += 1
 
-        # R1: MemoryCore / Redis
+        # R1: MemoryCore / Redis (with optional Bloom filter negative-cache)
         if "memory" in self.engines:
-            try:
-                redis_key = f"{cache_prefix}cache:{qhash}"
-                cached = await self.engines["memory"].get(redis_key)
-                if cached:
-                    data = json.loads(cached)
-                    self._r0_set(r0_key, data)
-                    self._r1_hits += 1
-                    return QueryResult(data=data, tier_served=CacheTier.R1_MEMORY,
-                                       engines_hit=["memory_core"],
-                                       latency_ms=(time.perf_counter() - start) * 1000, cache_hit=True)
-            except Exception as e:
-                logger.warning(f"R1 error: {e}")
+            redis_key = f"{cache_prefix}cache:{qhash}"
+            # Bloom filter: skip R1 lookup if key is definitely absent
+            bloom_skip = self._bloom and not self._bloom.might_contain(redis_key)
+            if not bloom_skip:
+                try:
+                    cached = await self.engines["memory"].get(redis_key)
+                    if cached:
+                        data = json.loads(cached)
+                        self._r0_set(r0_key, data)
+                        self._r1_hits += 1
+                        if self._bloom:
+                            self._bloom.add(redis_key)
+                        return QueryResult(data=data, tier_served=CacheTier.R1_MEMORY,
+                                           engines_hit=["memory_core"],
+                                           latency_ms=(time.perf_counter() - start) * 1000, cache_hit=True)
+                except Exception as e:
+                    logger.warning(f"R1 error: {e}")
 
-        # R2: Semantic Cache / VectorCore
+        # R2: Semantic Cache / VectorCore (per-collection adaptive thresholds)
         if "vector" in self.engines and hint != "skip_semantic":
             try:
                 collection = f"tenant_{tenant_id}_cache" if tenant_id else "response_cache"
-                similar = await self.engines["vector"].search_similar(
-                    collection=collection, query_text=query, threshold=0.95, limit=1)
-                if similar:
-                    data = similar[0]["payload"]["response"]
-                    await self._promote_to_r1(f"{cache_prefix}cache:{qhash}", data)
-                    self._r0_set(r0_key, data)
-                    self._r2_hits += 1
-                    return QueryResult(data=data, tier_served=CacheTier.R2_SEMANTIC,
-                                       engines_hit=["vector_core"],
-                                       latency_ms=(time.perf_counter() - start) * 1000, cache_hit=True)
+                # Use SemanticCacheConfig if available, else default 0.88
+                if self.semantic_cache_config:
+                    cache_cfg = self.semantic_cache_config.get_config(collection, query)
+                    r2_enabled = cache_cfg.r2_enabled
+                    threshold = cache_cfg.threshold
+                else:
+                    r2_enabled = True
+                    threshold = 0.88
+
+                if r2_enabled:
+                    similar = await self.engines["vector"].search_similar(
+                        collection=collection, query_text=query, threshold=threshold, limit=1)
+                    if similar:
+                        data = similar[0]["payload"]["response"]
+                        await self._promote_to_r1(f"{cache_prefix}cache:{qhash}", data)
+                        self._r0_set(r0_key, data)
+                        self._r2_hits += 1
+                        return QueryResult(data=data, tier_served=CacheTier.R2_SEMANTIC,
+                                           engines_hit=["vector_core"],
+                                           latency_ms=(time.perf_counter() - start) * 1000, cache_hit=True)
             except Exception as e:
                 logger.warning(f"R2 error: {e}")
 
@@ -234,17 +292,14 @@ class ReadCascade:
                 return
         except (TypeError, ValueError):
             pass
-
-        # LRU eviction: remove least recently used (front of OrderedDict)
-        while len(self._r0_cache) >= self._r0_max_size:
-            self._r0_cache.popitem(last=False)  # Pop oldest/least-used
-
         self._r0_cache[key] = value
 
     async def _promote_to_r1(self, key: str, data: Any, ttl: int = 3600):
         if "memory" in self.engines:
             try:
                 await self.engines["memory"].set(key, json.dumps(data, default=str), ex=ttl)
+                if self._bloom:
+                    self._bloom.add(key)
             except Exception:
                 pass
 
@@ -301,16 +356,19 @@ class WriteFanOut:
         "default":    {"sync": ["relational"], "async": []},
     }
 
-    MAX_PENDING_TASKS = 1000  # Backpressure limit
+    MAX_PENDING_TASKS = 1000  # Backpressure limit for in-memory fallback
 
-    def __init__(self, engines: Dict[str, Any], cache_invalidation=None):
+    def __init__(self, engines: Dict[str, Any], cache_invalidation=None,
+                 outbox_pool=None):
         self.engines = engines
         self.cache_invalidation = cache_invalidation
+        self._outbox_pool = outbox_pool  # asyncpg pool for outbox INSERT
         self._pending_tasks: Dict[str, asyncio.Task] = {}
         self._task_counter = 0
         self._failed_writes: List[Dict] = []  # Dead letter queue
         self._max_dlq = 500
-        self._stats = {"async_queued": 0, "async_completed": 0, "async_failed": 0}
+        self._stats = {"async_queued": 0, "async_completed": 0, "async_failed": 0,
+                       "outbox_inserts": 0}
 
     async def write(self, data_type: str, payload: Dict, actor: str = "system") -> Dict:
         start = time.perf_counter()
@@ -326,31 +384,24 @@ class WriteFanOut:
                     results["sync"][engine_name] = {"status": "error", "error": str(e)}
                     raise
 
-        # Async writes with tracking and backpressure
-        self._cleanup_completed_tasks()
-
+        # Async writes: prefer outbox INSERT (crash-safe) over asyncio.create_task
         for engine_name in route["async"]:
             if engine_name in self.engines:
-                if len(self._pending_tasks) >= self.MAX_PENDING_TASKS:
-                    logger.warning(f"Backpressure: {len(self._pending_tasks)} pending async writes. "
-                                   f"Executing {engine_name} synchronously.")
+                if self._outbox_pool:
                     try:
-                        await self.engines[engine_name].write(data_type, payload, actor)
-                        results["async"][engine_name] = {"status": "sync_fallback"}
+                        await self._outbox_insert(engine_name, data_type, payload, actor)
+                        results["async"][engine_name] = {"status": "outbox_queued"}
+                        self._stats["outbox_inserts"] += 1
                     except Exception as e:
-                        results["async"][engine_name] = {"status": "error", "error": str(e)}
+                        logger.warning(f"Outbox INSERT failed for {engine_name}, "
+                                       f"falling back to in-memory: {e}")
+                        self._queue_in_memory(engine_name, data_type, payload, actor, results)
                 else:
-                    self._task_counter += 1
-                    task_id = f"async-{self._task_counter}"
-                    task = asyncio.create_task(
-                        self._tracked_async_write(task_id, engine_name, data_type, payload, actor))
-                    self._pending_tasks[task_id] = task
-                    self._stats["async_queued"] += 1
-                    results["async"][engine_name] = {"status": "queued", "task_id": task_id}
+                    self._queue_in_memory(engine_name, data_type, payload, actor, results)
 
         results["latency_ms"] = (time.perf_counter() - start) * 1000
 
-        # Invalidate caches after write (also tracked)
+        # Invalidate caches after write
         if self.cache_invalidation:
             self._task_counter += 1
             tid = f"cache-{self._task_counter}"
@@ -358,6 +409,41 @@ class WriteFanOut:
             self._pending_tasks[tid] = task
 
         return results
+
+    async def _outbox_insert(self, engine_name: str, data_type: str,
+                              payload: Dict, actor: str):
+        """Insert an entry into the write_outbox table for OutboxWorker to process."""
+        async with self._outbox_pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO write_outbox (target_engine, data_type, payload, actor)
+                VALUES ($1, $2, $3::jsonb, $4)
+            """, engine_name, data_type, json.dumps(payload, default=str), actor)
+
+    def _queue_in_memory(self, engine_name: str, data_type: str,
+                          payload: Dict, actor: str, results: Dict):
+        """Fallback: queue async write in-memory when outbox is unavailable."""
+        self._cleanup_completed_tasks()
+        if len(self._pending_tasks) >= self.MAX_PENDING_TASKS:
+            logger.warning(f"Backpressure: {len(self._pending_tasks)} pending. "
+                           f"Executing {engine_name} synchronously.")
+            asyncio.create_task(self._sync_fallback(engine_name, data_type, payload, actor))
+            results["async"][engine_name] = {"status": "sync_fallback"}
+        else:
+            self._task_counter += 1
+            task_id = f"async-{self._task_counter}"
+            task = asyncio.create_task(
+                self._tracked_async_write(task_id, engine_name, data_type, payload, actor))
+            self._pending_tasks[task_id] = task
+            self._stats["async_queued"] += 1
+            results["async"][engine_name] = {"status": "queued", "task_id": task_id}
+
+    async def _sync_fallback(self, engine_name: str, data_type: str,
+                              payload: Dict, actor: str):
+        """Execute write synchronously as fallback."""
+        try:
+            await self.engines[engine_name].write(data_type, payload, actor)
+        except Exception as e:
+            logger.error(f"Sync fallback write to {engine_name} failed: {e}")
 
     async def _tracked_async_write(self, task_id: str, engine_name: str,
                                     data_type: str, payload: Dict,
@@ -375,29 +461,23 @@ class WriteFanOut:
                     self._stats["async_failed"] += 1
                     logger.error(f"Async write to {engine_name} failed after "
                                  f"{retries} retries: {e}")
-                    # Add to dead letter queue
                     if len(self._failed_writes) < self._max_dlq:
                         self._failed_writes.append({
-                            "task_id": task_id,
-                            "engine": engine_name,
-                            "data_type": data_type,
-                            "error": str(e),
+                            "task_id": task_id, "engine": engine_name,
+                            "data_type": data_type, "error": str(e),
                             "timestamp": time.time(),
                         })
 
     async def _safe_cache_invalidation(self, data_type: str, payload: Dict):
-        """Cache invalidation with error handling."""
         try:
             await self.cache_invalidation.on_write(data_type, payload)
         except Exception as e:
             logger.warning(f"Cache invalidation failed: {e}")
 
     def _cleanup_completed_tasks(self):
-        """Remove completed tasks from the tracking dict."""
         done = [tid for tid, task in self._pending_tasks.items() if task.done()]
         for tid in done:
             task = self._pending_tasks.pop(tid)
-            # Surface unhandled exceptions
             if task.exception():
                 logger.error(f"Background task {tid} exception: {task.exception()}")
 
@@ -429,6 +509,7 @@ class WriteFanOut:
             **self._stats,
             "pending": len(self._pending_tasks),
             "dlq_size": len(self._failed_writes),
+            "outbox_mode": self._outbox_pool is not None,
         }
 
 
@@ -457,6 +538,10 @@ class CortexDB:
         self._query_count = 0
         self._start_time = time.time()
         self._version = __version__
+        # Graceful degradation
+        self._degraded_mode = False
+        self._degraded_since: Optional[float] = None
+        self._degraded_write_buffer_key = "cortexdb:degraded:write_buffer"
 
     def _default_config(self) -> Dict:
         import os
@@ -525,9 +610,16 @@ class CortexDB:
         from cortexdb.core.sleep_cycle import SleepCycleScheduler
         from cortexdb.core.precompute import PreComputeEngine
 
+        from cortexdb.core.cache_config import SemanticCacheConfig
+        from cortexdb.core.bloom import BloomFilter
+        self.semantic_cache_config = SemanticCacheConfig()
+        self._bloom_filter = BloomFilter(size=1_000_000, num_hashes=7)
+
         self.tenant_isolation = TenantIsolation(self.engines)
         self.cache_invalidation = CacheInvalidationEngine(engines=self.engines)
-        self.read_cascade = ReadCascade(self.engines, self.tenant_isolation)
+        self.read_cascade = ReadCascade(self.engines, self.tenant_isolation,
+                                        semantic_cache_config=self.semantic_cache_config)
+        self.read_cascade._bloom = self._bloom_filter
         self.write_fanout = WriteFanOut(self.engines, self.cache_invalidation)
         self.bridge = BridgeEngine(self.engines)
         self.parser = CortexQLParser()
@@ -609,6 +701,25 @@ class CortexDB:
         verdict = self.amygdala.assess(json.dumps(payload, default=str), actor)
         if not verdict.allowed:
             raise PermissionError(f"Write blocked by Amygdala: {verdict.threats_detected}")
+
+        # Degraded mode: buffer writes in Redis for later replay
+        if self._degraded_mode:
+            if "memory" in self.engines:
+                try:
+                    buffer_entry = json.dumps({
+                        "data_type": data_type, "payload": payload,
+                        "actor": actor, "buffered_at": time.time(),
+                    }, default=str)
+                    await self.engines["memory"].client.rpush(
+                        self._degraded_write_buffer_key, buffer_entry)
+                    return {"status": "DEGRADED_MODE", "buffered": True,
+                            "message": "Write buffered in Redis, will replay when PG recovers"}
+                except Exception as e:
+                    logger.error(f"Failed to buffer write in degraded mode: {e}")
+                    return {"status": "DEGRADED_MODE", "buffered": False,
+                            "error": "Cannot buffer write — both PG and Redis unavailable"}
+            return {"status": "DEGRADED_MODE", "error": "No memory engine for buffering"}
+
         return await self.write_fanout.write(data_type, payload, actor)
 
     async def health(self) -> Dict:
@@ -621,6 +732,8 @@ class CortexDB:
             "engines": {},
             "connection_pool": {**pool_stats, "health": pool_health},
             "cache": self.read_cascade.stats if self.read_cascade else {},
+            "bloom_filter": self._bloom_filter.stats if getattr(self, "_bloom_filter", None) else {},
+            "degradation": self.degradation_status,
             "plasticity": {"top_paths_count": len(self.plasticity.top_paths)},
             "amygdala": self.amygdala.stats,
             "bridge": self.bridge.get_stats() if self.bridge else {},
@@ -634,6 +747,51 @@ class CortexDB:
                 health["engines"][name] = {"status": "unhealthy", "error": str(e)}
                 health["status"] = "degraded"
         return health
+
+    def enter_degraded_mode(self, reason: str = "R3 unavailable"):
+        """Enter cache-only degraded mode when persistent store is down."""
+        if not self._degraded_mode:
+            self._degraded_mode = True
+            self._degraded_since = time.time()
+            logger.warning(f"CortexDB entering DEGRADED MODE: {reason}")
+
+    def exit_degraded_mode(self):
+        """Exit degraded mode when persistent store recovers."""
+        if self._degraded_mode:
+            duration = time.time() - (self._degraded_since or time.time())
+            self._degraded_mode = False
+            self._degraded_since = None
+            logger.info(f"CortexDB exiting degraded mode (was degraded for {duration:.1f}s)")
+
+    async def _replay_buffered_writes(self):
+        """Replay writes that were buffered in Redis during degraded mode."""
+        if "memory" not in self.engines:
+            return
+        try:
+            client = self.engines["memory"].client
+            entries = await client.lrange(self._degraded_write_buffer_key, 0, -1)
+            if not entries:
+                return
+            logger.info(f"Replaying {len(entries)} buffered writes from degraded mode")
+            for entry_json in entries:
+                try:
+                    entry = json.loads(entry_json)
+                    await self.write_fanout.write(
+                        entry["data_type"], entry["payload"], entry.get("actor", "system"))
+                except Exception as e:
+                    logger.error(f"Failed to replay buffered write: {e}")
+            await client.delete(self._degraded_write_buffer_key)
+            logger.info("Degraded mode write replay complete")
+        except Exception as e:
+            logger.error(f"Failed to replay buffered writes: {e}")
+
+    @property
+    def degradation_status(self) -> Dict:
+        return {
+            "degraded": self._degraded_mode,
+            "since": self._degraded_since,
+            "duration_seconds": round(time.time() - self._degraded_since, 1) if self._degraded_since else 0,
+        }
 
     async def close(self):
         # Drain async writes first

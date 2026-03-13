@@ -51,8 +51,8 @@ VALID_PLUGIN_TYPES = {"engine", "hook", "middleware"}
 
 _REQUIRED_MANIFEST_KEYS = {"id", "name", "version", "type", "entry_point"}
 
-_DB_DIR = Path(os.environ.get("CORTEXDB_DATA_DIR", "data"))
-_DB_PATH = _DB_DIR / "superadmin.db"
+_DB_DIR = Path(os.environ.get("CORTEXDB_DATA_DIR", os.path.join("data", "superadmin")))
+_DB_PATH = _DB_DIR / "cortexdb_admin.db"
 
 # Table 'installed_plugins' is managed by the SQLite migration system
 # (see migrations.py v5). The old _CREATE_TABLE_SQL constant has been removed.

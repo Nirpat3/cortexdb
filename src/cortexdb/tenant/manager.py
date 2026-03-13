@@ -3,6 +3,7 @@
 Onboarding -> Active -> Offboarding with full data isolation.
 """
 
+import asyncio
 import hashlib
 import secrets
 import time
@@ -67,6 +68,9 @@ class TenantManager:
         self.engines = engines or {}
         self._tenants: Dict[str, Tenant] = {}
         self._api_key_index: Dict[str, str] = {}  # api_key_hash -> tenant_id
+        self._last_reload_check: float = 0.0
+        self._reload_task: Optional[asyncio.Task] = None
+        self._reload_interval: float = 60.0
 
     @staticmethod
     def _hash_api_key(api_key: str) -> str:
@@ -218,6 +222,80 @@ class TenantManager:
         purged["status"] = "purged"
         logger.info(f"Tenant purged: {tenant_id}")
         return purged
+
+    async def reload_from_db(self) -> int:
+        """Reload tenants from DB. Delta query: only rows updated since last check."""
+        if "relational" not in self.engines:
+            return 0
+        try:
+            engine = self.engines["relational"]
+            if self._last_reload_check > 0:
+                import datetime
+                since = datetime.datetime.fromtimestamp(self._last_reload_check,
+                                                        tz=datetime.timezone.utc)
+                rows = await engine.pool.fetch(
+                    "SELECT tenant_id, name, plan, status, api_key_hash, config, "
+                    "EXTRACT(EPOCH FROM updated_at) as updated_epoch "
+                    "FROM tenants WHERE updated_at > $1", since)
+            else:
+                rows = await engine.pool.fetch(
+                    "SELECT tenant_id, name, plan, status, api_key_hash, config, "
+                    "EXTRACT(EPOCH FROM COALESCE(updated_at, created_at)) as updated_epoch "
+                    "FROM tenants")
+            self._last_reload_check = time.time()
+            updated = 0
+            for row in rows:
+                tid = row["tenant_id"]
+                plan = TenantPlan(row["plan"]) if row["plan"] in [p.value for p in TenantPlan] else TenantPlan.FREE
+                status = TenantStatus(row["status"]) if row["status"] in [s.value for s in TenantStatus] else TenantStatus.ACTIVE
+                import json
+                config = json.loads(row["config"]) if isinstance(row["config"], str) else (row["config"] or {})
+                if tid in self._tenants:
+                    t = self._tenants[tid]
+                    t.plan = plan
+                    t.status = status
+                    t.config = config
+                    if row["api_key_hash"] and row["api_key_hash"] != t.api_key_hash:
+                        self._api_key_index.pop(t.api_key_hash, None)
+                        t.api_key_hash = row["api_key_hash"]
+                        self._api_key_index[t.api_key_hash] = tid
+                else:
+                    tenant = Tenant(
+                        tenant_id=tid, name=row["name"], plan=plan,
+                        status=status, api_key_hash=row["api_key_hash"] or "",
+                        config=config,
+                    )
+                    self._tenants[tid] = tenant
+                    if tenant.api_key_hash:
+                        self._api_key_index[tenant.api_key_hash] = tid
+                updated += 1
+            if updated:
+                logger.info(f"Tenant hot-reload: {updated} tenant(s) updated")
+            return updated
+        except Exception as e:
+            logger.warning(f"Tenant reload_from_db failed: {e}")
+            return 0
+
+    async def start_reload_loop(self) -> None:
+        """Start background reload loop (every 60s)."""
+        if self._reload_task and not self._reload_task.done():
+            return
+        self._reload_task = asyncio.create_task(self._reload_loop())
+        logger.info("Tenant hot-reload loop started")
+
+    async def stop_reload_loop(self) -> None:
+        if self._reload_task and not self._reload_task.done():
+            self._reload_task.cancel()
+            try:
+                await self._reload_task
+            except asyncio.CancelledError:
+                pass
+            logger.info("Tenant hot-reload loop stopped")
+
+    async def _reload_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self._reload_interval)
+            await self.reload_from_db()
 
     def resolve_tenant(self, api_key: str) -> Optional[Tenant]:
         """Resolve API key to tenant. O(1) lookup."""

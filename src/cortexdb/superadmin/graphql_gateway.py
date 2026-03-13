@@ -26,7 +26,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("cortexdb.graphql_gateway")
 
-DEFAULT_DB_PATH = os.path.join("data", "superadmin.db")
+DEFAULT_DB_PATH = os.path.join(
+    os.environ.get("CORTEXDB_DATA_DIR", os.path.join("data", "superadmin")),
+    "cortexdb_admin.db",
+)
 
 # ── Default GraphQL schema ────────────────────────────────────────────
 

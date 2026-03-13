@@ -14,8 +14,16 @@ except ImportError:
 
 
 class StreamEngine(BaseEngine):
+    RECONNECT_ERRORS = (ConnectionError, TimeoutError, OSError)
+
     def __init__(self, config: Dict):
-        self.url = config.get("url", "redis://localhost:6380/0")
+        super().__init__()
+        import os
+        self._use_uds = os.getenv("CORTEX_USE_UNIX_SOCKETS", "").lower() in ("true", "1")
+        if self._use_uds:
+            self.url = config.get("uds_path", "unix:///var/run/redis/redis-stream.sock")
+        else:
+            self.url = config.get("url", "redis://localhost:6380/0")
         self.password = config.get("password", "cortex_stream_secret")
         self.client = None
 
@@ -35,19 +43,24 @@ class StreamEngine(BaseEngine):
             "engine": "Redis Streams",
             "brain_region": "Thalamic Relay",
             "used_memory_mb": round(info.get("used_memory", 0) / 1024 / 1024, 2),
+            **self.reconnect_stats,
         }
 
     async def publish(self, stream: str, event: Dict) -> str:
-        """Publish event to stream (like thalamus routing sensory signal)"""
         event["_timestamp"] = time.time()
-        return await self.client.xadd(
-            stream,
-            {k: json.dumps(v) if not isinstance(v, str) else v for k, v in event.items()}
-        )
+        return await self._with_reconnect(
+            "publish",
+            lambda: self.client.xadd(
+                stream,
+                {k: json.dumps(v) if not isinstance(v, str) else v for k, v in event.items()}
+            ),
+            reconnect_errors=self.RECONNECT_ERRORS)
 
     async def subscribe(self, stream: str, last_id: str = "$", count: int = 10):
-        """Read from stream"""
-        return await self.client.xread({stream: last_id}, count=count, block=1000)
+        return await self._with_reconnect(
+            "subscribe",
+            lambda: self.client.xread({stream: last_id}, count=count, block=1000),
+            reconnect_errors=self.RECONNECT_ERRORS)
 
     async def write(self, data_type: str, payload: Dict, actor: str = "system") -> Any:
         return await self.publish(

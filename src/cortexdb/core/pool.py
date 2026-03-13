@@ -62,6 +62,14 @@ class ConnectionPoolManager:
         self._retry_attempts: int = 3
         self._retry_base_delay: float = 0.5  # seconds, exponential backoff base
 
+        # Auto-scaling state
+        self._auto_scale_task: Optional[asyncio.Task] = None
+        self._scale_check_interval: float = 30.0  # seconds
+        self._high_util_count: int = 0  # consecutive high utilization checks
+        self._low_util_count: int = 0  # consecutive low utilization checks
+        self._max_pool_ceiling: int = 100
+        self._original_max_size: int = self._max_size
+
     async def initialize(self) -> None:
         """Create the connection pool with retry logic.
 
@@ -212,7 +220,180 @@ class ConnectionPoolManager:
             "uptime_seconds": round(time.time() - self._created_at, 1)
             if self._created_at
             else 0,
+            "auto_scaling": {
+                "enabled": self._auto_scale_task is not None
+                and not self._auto_scale_task.done(),
+                "original_max_size": self._original_max_size,
+                "max_pool_ceiling": self._max_pool_ceiling,
+                "high_util_streak": self._high_util_count,
+                "low_util_streak": self._low_util_count,
+            },
         }
+
+    async def start_auto_scaling(self) -> None:
+        """Start the background auto-scaling loop.
+
+        The loop checks pool utilization every ``_scale_check_interval`` seconds
+        and adjusts pool size when sustained high or low utilization is detected.
+        """
+        if self._auto_scale_task is not None and not self._auto_scale_task.done():
+            logger.warning("Auto-scaling is already running.")
+            return
+
+        self._auto_scale_task = asyncio.create_task(self._auto_scale_loop())
+        logger.info(
+            "Auto-scaling started (check every %.0fs, ceiling=%d)",
+            self._scale_check_interval,
+            self._max_pool_ceiling,
+        )
+
+    async def stop_auto_scaling(self) -> None:
+        """Cancel the background auto-scaling loop."""
+        if self._auto_scale_task is None or self._auto_scale_task.done():
+            return
+
+        self._auto_scale_task.cancel()
+        try:
+            await self._auto_scale_task
+        except asyncio.CancelledError:
+            pass
+        self._auto_scale_task = None
+        self._high_util_count = 0
+        self._low_util_count = 0
+        logger.info("Auto-scaling stopped.")
+
+    async def _auto_scale_loop(self) -> None:
+        """Background loop that monitors utilization and triggers pool resizing.
+
+        Scale-up: >80% utilization for 3 consecutive checks → increase max_size by 25%.
+        Scale-down: <20% utilization for 5 consecutive checks → decrease max_size by 25%.
+        """
+        try:
+            while True:
+                await asyncio.sleep(self._scale_check_interval)
+
+                if self._pool is None:
+                    continue
+
+                pool_size = self._pool.get_size()
+                if pool_size == 0:
+                    continue
+
+                idle = self._pool.get_idle_size()
+                used = pool_size - idle
+                utilization = (used / pool_size) * 100
+
+                # --- Scale up check ---
+                if utilization > 80:
+                    self._high_util_count += 1
+                    self._low_util_count = 0
+                    logger.debug(
+                        "High utilization %.1f%% (count %d/3)",
+                        utilization,
+                        self._high_util_count,
+                    )
+
+                    if self._high_util_count >= 3:
+                        new_size = min(
+                            int(self._max_size * 1.25),
+                            self._max_pool_ceiling,
+                        )
+                        if new_size > self._max_size:
+                            logger.info(
+                                "Scaling up pool: %d → %d (utilization %.1f%% for 3 checks)",
+                                self._max_size,
+                                new_size,
+                                utilization,
+                            )
+                            await self._swap_pool(new_size)
+                        else:
+                            logger.info(
+                                "Pool at ceiling (%d), cannot scale up further.",
+                                self._max_pool_ceiling,
+                            )
+                        self._high_util_count = 0
+
+                # --- Scale down check ---
+                elif utilization < 20:
+                    self._low_util_count += 1
+                    self._high_util_count = 0
+                    logger.debug(
+                        "Low utilization %.1f%% (count %d/5)",
+                        utilization,
+                        self._low_util_count,
+                    )
+
+                    if self._low_util_count >= 5:
+                        new_size = max(
+                            int(self._max_size * 0.75),
+                            self._original_max_size,
+                        )
+                        if new_size < self._max_size:
+                            logger.info(
+                                "Scaling down pool: %d → %d (utilization %.1f%% for 5 checks)",
+                                self._max_size,
+                                new_size,
+                                utilization,
+                            )
+                            await self._swap_pool(new_size)
+                        else:
+                            logger.debug(
+                                "Pool already at original size (%d), skip scale-down.",
+                                self._original_max_size,
+                            )
+                        self._low_util_count = 0
+
+                else:
+                    # Utilization in normal range — reset counters
+                    self._high_util_count = 0
+                    self._low_util_count = 0
+
+        except asyncio.CancelledError:
+            logger.debug("Auto-scale loop cancelled.")
+            raise
+
+    async def _swap_pool(self, new_max_size: int) -> None:
+        """Create a new pool with *new_max_size* and atomically swap it in.
+
+        The old pool is closed with a 10-second timeout; in-flight queries on
+        already-acquired connections finish against the old pool while new
+        ``acquire()`` calls use the replacement.
+        """
+        old_pool = self._pool
+        old_max = self._max_size
+
+        try:
+            new_pool = await asyncpg.create_pool(
+                dsn=self._dsn,
+                min_size=self._min_size,
+                max_size=new_max_size,
+                max_queries=self._max_queries,
+                max_inactive_connection_lifetime=self._max_inactive_lifetime,
+                command_timeout=30,
+            )
+        except Exception as exc:
+            self._error_count += 1
+            logger.error("Failed to create replacement pool (max=%d): %s", new_max_size, exc)
+            return
+
+        # Atomic swap
+        self._pool = new_pool
+        self._max_size = new_max_size
+        logger.info(
+            "Pool swapped: max_size %d → %d (%d connections ready)",
+            old_max,
+            new_max_size,
+            new_pool.get_size(),
+        )
+
+        # Drain old pool
+        if old_pool is not None:
+            try:
+                await asyncio.wait_for(old_pool.close(), timeout=10.0)
+                logger.debug("Old pool closed gracefully.")
+            except asyncio.TimeoutError:
+                logger.warning("Old pool close timed out, terminating.")
+                old_pool.terminate()
 
     async def close(self, timeout: float = 10.0) -> None:
         """Gracefully shut down the pool.
@@ -220,6 +401,8 @@ class ConnectionPoolManager:
         Waits up to ``timeout`` seconds for in-flight connections to be
         released, then forcefully closes remaining connections.
         """
+        await self.stop_auto_scaling()
+
         if self._pool is None:
             return
 

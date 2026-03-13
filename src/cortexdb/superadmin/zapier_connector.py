@@ -26,7 +26,10 @@ from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger("cortexdb.zapier")
 
-DEFAULT_DB_PATH = os.path.join("data", "superadmin.db")
+DEFAULT_DB_PATH = os.path.join(
+    os.environ.get("CORTEXDB_DATA_DIR", os.path.join("data", "superadmin")),
+    "cortexdb_admin.db",
+)
 
 # All event types supported by the connector
 SUPPORTED_EVENTS = [

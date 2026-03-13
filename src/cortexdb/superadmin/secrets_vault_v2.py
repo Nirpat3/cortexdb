@@ -40,7 +40,7 @@ class SecretsVaultV2:
         # are managed by the SQLite migration system (see migrations.py v5).
 
         # Auto-unseal if no secrets exist yet (first run)
-        count = conn.execute("SELECT COUNT(*) FROM vault_secrets").fetchone()[0]
+        count = self._persistence.conn.execute("SELECT COUNT(*) FROM vault_secrets").fetchone()[0]
         if count == 0:
             self._sealed = False
             logger.info("Vault initialized (unsealed — empty vault)")

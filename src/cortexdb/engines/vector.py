@@ -62,9 +62,16 @@ def embed_text(text: str) -> List[float]:
 
 
 class VectorEngine(BaseEngine):
+    RECONNECT_ERRORS = (ConnectionError, TimeoutError, OSError)
+
     def __init__(self, config: Dict):
+        super().__init__()
         self.url = config.get("url", "http://localhost:6333")
+        self._replica_url = config.get("replica_url", "http://localhost:6335")
+        self._replica_enabled = config.get("replica_enabled", False)
         self.client = None
+        self._replica_client = None
+        self._using_replica = False
         self._collections_created: set = set()
         self._search_count = 0
         self._write_count = 0
@@ -73,6 +80,14 @@ class VectorEngine(BaseEngine):
         if AsyncQdrantClient is None:
             raise ImportError("qdrant-client required: pip install qdrant-client")
         self.client = AsyncQdrantClient(url=self.url)
+        # Connect replica if enabled
+        if self._replica_enabled:
+            try:
+                self._replica_client = AsyncQdrantClient(url=self._replica_url)
+                logger.info("Qdrant replica connected at %s", self._replica_url)
+            except Exception as e:
+                logger.warning("Qdrant replica unavailable: %s", e)
+                self._replica_client = None
         collections = await self.client.get_collections()
         names = [c.name for c in collections.collections]
         self._collections_created = set(names)
@@ -98,6 +113,9 @@ class VectorEngine(BaseEngine):
             "vector_dim": VECTOR_DIM,
             "searches": self._search_count,
             "writes": self._write_count,
+            "replica_enabled": self._replica_enabled,
+            "using_replica": self._using_replica,
+            **self.reconnect_stats,
         }
 
     async def _ensure_collection(self, collection: str):
@@ -135,13 +153,17 @@ class VectorEngine(BaseEngine):
             )
 
         try:
-            results = await self.client.search(
-                collection_name=collection,
-                query_vector=query_vector,
-                query_filter=query_filter,
-                limit=limit,
-                score_threshold=threshold,
-            )
+            async def _do_search():
+                return await self.client.search(
+                    collection_name=collection,
+                    query_vector=query_vector,
+                    query_filter=query_filter,
+                    limit=limit,
+                    score_threshold=threshold,
+                )
+            results = await self._with_reconnect(
+                "search", _do_search, reconnect_errors=self.RECONNECT_ERRORS)
+            self._using_replica = False
             return [
                 {
                     "id": str(hit.id),
@@ -151,6 +173,25 @@ class VectorEngine(BaseEngine):
                 for hit in results
             ]
         except Exception as e:
+            # Failover to replica
+            if self._replica_client:
+                try:
+                    logger.warning(f"Primary failed, failing over to replica: {e}")
+                    results = await self._replica_client.search(
+                        collection_name=collection,
+                        query_vector=query_vector,
+                        query_filter=query_filter,
+                        limit=limit,
+                        score_threshold=threshold,
+                    )
+                    self._using_replica = True
+                    return [
+                        {"id": str(hit.id), "score": round(hit.score, 4),
+                         "payload": hit.payload or {}}
+                        for hit in results
+                    ]
+                except Exception as replica_err:
+                    logger.warning(f"Replica also failed: {replica_err}")
             logger.warning(f"Vector search failed in {collection}: {e}")
             return []
 

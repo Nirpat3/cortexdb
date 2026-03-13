@@ -17,9 +17,10 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("cortexdb.migrator")
 
-# Resolve migrations directory relative to project root
-_PROJECT_ROOT = Path(__file__).resolve().parents[3]  # src/cortexdb/core -> project root
-MIGRATIONS_DIR = _PROJECT_ROOT / "db" / "migrations"
+# Resolve migrations directory — supports both source layout (src/cortexdb/core)
+# and container layout (cortexdb/core) via MIGRATIONS_DIR env override.
+_PROJECT_ROOT = Path(os.environ.get("CORTEXDB_ROOT", Path(__file__).resolve().parents[3]))
+MIGRATIONS_DIR = Path(os.environ.get("MIGRATIONS_DIR", _PROJECT_ROOT / "db" / "migrations"))
 
 # Advisory lock ID — arbitrary but fixed for all CortexDB instances
 ADVISORY_LOCK_ID = 42

@@ -479,6 +479,8 @@ class WriteFanOut:
         "audit":      {"sync": ["immutable"], "async": ["relational"]},
         "grid_event": {"sync": ["relational"], "async": ["temporal", "stream"]},
         "experience": {"sync": ["relational"], "async": ["vector"]},
+        "evaluation": {"sync": ["relational"], "async": ["stream"]},
+        "skill_transition": {"sync": ["relational"], "async": []},
         "a2a_task":   {"sync": ["relational"], "async": ["stream"]},
         "tenant":     {"sync": ["relational", "immutable"], "async": ["stream"]},
         "default":    {"sync": ["relational"], "async": []},

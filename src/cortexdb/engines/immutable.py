@@ -13,6 +13,7 @@ from cortexdb.engines import BaseEngine
 
 class ImmutableEngine(BaseEngine):
     def __init__(self, config: Dict):
+        super().__init__()
         self.path = config.get("path", "./data/immutable")
         self._chain: List[Dict] = []
         self._prev_hash: Optional[str] = None

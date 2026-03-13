@@ -83,11 +83,12 @@ class RepairEngine:
     - Security-related: skip ALL, quarantine with forensics
     """
 
-    def __init__(self, state_machine: NodeStateMachine):
+    def __init__(self, state_machine: NodeStateMachine, db_pool=None):
         self.state_machine = state_machine
         self._active_sessions: Dict[str, RepairSession] = {}
         self._repair_handlers: Dict[RepairLevel, Callable] = {}
         self._human_alert_callback: Optional[Callable] = None
+        self._db_pool = db_pool  # asyncpg pool for session persistence
 
     def register_handler(self, level: RepairLevel, handler: Callable) -> None:
         self._repair_handlers[level] = handler
@@ -120,6 +121,79 @@ class RepairEngine:
             return RepairLevel.L2_HARD_RESTART
         return RepairLevel.L1_SOFT_RESTART
 
+    async def _persist_session(self, session: RepairSession) -> None:
+        """Persist repair session to DB for crash recovery."""
+        if not self._db_pool:
+            return
+        try:
+            import json
+            attempts_json = json.dumps([
+                {"level": a.level.value, "started_at": a.started_at,
+                 "completed_at": a.completed_at, "success": a.success,
+                 "error_message": a.error_message, "duration_seconds": a.duration_seconds}
+                for a in session.attempts
+            ])
+            async with self._db_pool.acquire() as conn:
+                await conn.execute(
+                    """INSERT INTO repair_sessions
+                       (session_id, node_id, started_at, completed_at,
+                        starting_level, current_level, final_result, attempts)
+                       VALUES ($1, $2, to_timestamp($3), $4, $5, $6, $7, $8::jsonb)
+                       ON CONFLICT (session_id) DO UPDATE SET
+                         completed_at = EXCLUDED.completed_at,
+                         current_level = EXCLUDED.current_level,
+                         final_result = EXCLUDED.final_result,
+                         attempts = EXCLUDED.attempts""",
+                    f"{session.node_id}_{int(session.started_at)}",
+                    session.node_id,
+                    session.started_at,
+                    time.time() if session.completed_at else None,
+                    session.starting_level.value,
+                    session.attempts[-1].level.value if session.attempts else session.starting_level.value,
+                    session.final_result,
+                    attempts_json,
+                )
+        except Exception as e:
+            logger.warning(f"Failed to persist repair session: {e}")
+
+    async def resume_incomplete_sessions(self) -> List[str]:
+        """Resume incomplete repair sessions from DB after restart."""
+        if not self._db_pool:
+            return []
+        resumed = []
+        try:
+            async with self._db_pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT node_id, starting_level FROM repair_sessions "
+                    "WHERE completed_at IS NULL ORDER BY started_at"
+                )
+            for row in rows:
+                node_id = row["node_id"]
+                node = self.state_machine.get_node(node_id)
+                if node and node.state in (NodeState.QUARANTINE, NodeState.REPAIRING):
+                    logger.info(f"Resuming incomplete repair for {node_id}")
+                    asyncio.create_task(self.start_repair(node_id))
+                    resumed.append(node_id)
+                else:
+                    # Node no longer needs repair — mark session complete
+                    await self._mark_session_complete(node_id, "stale_on_restart")
+        except Exception as e:
+            logger.warning(f"Failed to resume repair sessions: {e}")
+        return resumed
+
+    async def _mark_session_complete(self, node_id: str, result: str) -> None:
+        if not self._db_pool:
+            return
+        try:
+            async with self._db_pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE repair_sessions SET completed_at = now(), final_result = $1 "
+                    "WHERE node_id = $2 AND completed_at IS NULL",
+                    result, node_id,
+                )
+        except Exception as e:
+            logger.warning(f"Failed to mark session complete: {e}")
+
     async def start_repair(self, node_id: str) -> RepairSession:
         node = self.state_machine.get_node(node_id)
         if not node:
@@ -133,6 +207,7 @@ class RepairEngine:
 
         self.state_machine.transition(node_id, NodeState.REPAIRING,
                                       f"Repair Engine starting at L{starting_level}")
+        await self._persist_session(session)
 
         for level in RepairLevel:
             if level < starting_level:
@@ -150,6 +225,7 @@ class RepairEngine:
                 attempt.duration_seconds = attempt.completed_at - attempt.started_at
                 session.final_result = "unrepairable"
                 session.completed_at = time.time()
+                await self._persist_session(session)
                 if self._human_alert_callback:
                     await self._human_alert_callback(node, session)
                 self.state_machine.transition(node_id, NodeState.DRAINING,
@@ -178,9 +254,12 @@ class RepairEngine:
                 "duration": attempt.duration_seconds,
             })
 
+            await self._persist_session(session)
+
             if success:
                 session.final_result = "repaired"
                 session.completed_at = time.time()
+                await self._persist_session(session)
                 self.state_machine.transition(node_id, NodeState.PROBATION,
                                               f"L{level} repair successful")
                 break
@@ -188,6 +267,7 @@ class RepairEngine:
         if not session.completed_at:
             session.final_result = "unrepairable"
             session.completed_at = time.time()
+            await self._persist_session(session)
             self.state_machine.transition(node_id, NodeState.DRAINING, "Repair window exhausted")
 
         self._active_sessions.pop(node_id, None)
@@ -196,9 +276,10 @@ class RepairEngine:
     def get_active_session(self, node_id: str) -> Optional[RepairSession]:
         return self._active_sessions.get(node_id)
 
-    def cancel_repair(self, node_id: str, reason: str = "self_healed") -> None:
+    async def cancel_repair(self, node_id: str, reason: str = "self_healed") -> None:
         session = self._active_sessions.pop(node_id, None)
         if session:
             session.final_result = reason
             session.completed_at = time.time()
+            await self._persist_session(session)
             logger.info(f"Repair cancelled for {node_id}: {reason}")

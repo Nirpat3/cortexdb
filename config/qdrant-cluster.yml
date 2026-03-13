@@ -1,0 +1,28 @@
+# Qdrant Cluster Configuration — Two-Node Replication
+# Primary: port 6333, Replica: port 6335
+# Provides read failover and data redundancy
+
+storage:
+  storage_path: ./qdrant_data
+  snapshots_path: ./qdrant_snapshots
+  on_disk_payload: true
+
+service:
+  max_request_size_mb: 32
+  enable_tls: false
+
+cluster:
+  enabled: true
+  p2p:
+    port: 6334   # Primary inter-node communication
+  consensus:
+    tick_period_ms: 100
+
+# Collection defaults — all collections get replication_factor=2
+collection_defaults:
+  replication_factor: 2
+  write_consistency_factor: 1  # Write to primary, async replicate
+  read_fan_out_factor: 0       # Read from primary only (failover reads from replica)
+
+# Replica node config (run on port 6335)
+# Start with: qdrant --config-path config/qdrant-cluster.yml --uri http://localhost:6335 --bootstrap http://localhost:6333

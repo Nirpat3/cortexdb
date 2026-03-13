@@ -21,9 +21,15 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY cortexdb/ ./cortexdb/
+COPY src/cortexdb/ ./cortexdb/
+COPY db/migrations/ ./db/migrations/
 
 RUN mkdir -p /data/immutable /data/cache /data/superadmin && \
     chown -R cortex:cortex /data /app
+
+ENV CORTEXDB_ROOT=/app
+ENV CORTEXDB_DATA_DIR=/data/superadmin
+ENV CORTEXDB_FORCE_MIGRATE=true
 
 USER cortex
 

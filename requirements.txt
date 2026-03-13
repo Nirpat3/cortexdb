@@ -42,6 +42,16 @@ cryptography==44.*
 pytest==8.*
 pytest-asyncio==0.24.*
 
+# Cache
+cachetools>=5.3.0
+
+# Bloom Filter
+mmh3>=4.0.0
+bitarray>=2.8.0
+
+# Process Monitoring
+psutil>=5.9.0
+
 # Utilities
 python-dotenv==1.*
 httpx==0.28.*
