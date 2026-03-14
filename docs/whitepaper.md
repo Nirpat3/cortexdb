@@ -1,4 +1,4 @@
-# CortexDB™ Technical White Paper
+# CortexEngine (CortexDB)™ Technical White Paper
 
 **Version 6.1.0 — March 2026**
 **Nirlab Inc.**
@@ -7,9 +7,20 @@
 
 ## Abstract
 
-CortexDB is an AI Agent Data Infrastructure layer that coordinates PostgreSQL, Redis, and Qdrant through a unified API. It provides capabilities no single database or ORM offers: semantic caching (finding cached responses to semantically similar queries), automatic write fan-out with a transactional outbox pattern, embedding sync (automatic vector freshness), agent-to-agent discovery, agent memory with temporal decay, and MCP tool exposure for AI agents.
+CortexDB (CortexEngine) is an AI Agent Data Infrastructure **logic layer** that coordinates best-of-breed engines (relational, cache, vector, stream, and trace stores) through a unified API. It provides capabilities no single database or ORM offers: semantic caching (finding cached responses to semantically similar queries), automatic write fan-out with a transactional outbox pattern, embedding sync (automatic vector freshness), agent-to-agent discovery, agent memory with temporal decay, and MCP tool exposure for AI agents.
 
-CortexDB sits **alongside** your existing databases — not as a replacement. The TypeScript SDK routes simple CRUD directly to PostgreSQL (zero overhead) and only sends cross-engine operations through the Python intelligence sidecar.
+CortexDB sits **alongside** your existing databases — not as a replacement. The TypeScript SDK routes simple CRUD directly to PostgreSQL/Redis (zero overhead) and only sends cross-engine operations through the CortexDB service when the operation truly requires it (fan-out writes, semantic cache, cross-engine joins, agent discovery, memory protocols).
+
+### Engine Abstraction (Recommended Mapping)
+
+In a typical deployment, CortexDB maps high-level capabilities to engines like:
+- **Context / working memory** → Redis
+- **Stream / event bus** → Redis Streams (Kafka/Redpanda-compatible contract)
+- **Vector search** → Qdrant (pgvector supported as an alternative)
+- **Config / governance** → PostgreSQL (source of truth) + optional Redis cache
+- **Traces / observability** → PostgreSQL/Supabase today (ClickHouse-compatible contract)
+
+This keeps application code stable while allowing the underlying engines to evolve based on latency, scale, cost, or operational constraints.
 
 Version 6.1.0 incorporates findings from a PhD expert panel evaluation (distributed systems, AI/ML, and security specialists) with all P0 security fixes, P1 production readiness enhancements, and the agent memory protocol implemented.
 
