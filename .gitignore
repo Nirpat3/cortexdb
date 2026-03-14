@@ -73,3 +73,4 @@ dashboard/.env.local
 # Claude Code
 .claude/
 dashboard/.claude/
+.venv/
