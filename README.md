@@ -6,15 +6,27 @@
   <img src="https://img.shields.io/badge/TypeScript-5.5+-3178C6" alt="TypeScript">
 </p>
 
-# CortexDB
+# CortexEngine (CortexDB)
 
-### AI Agent Data Infrastructure
+### AI Agent Data Infrastructure (Logic Layer over Best-of-Breed Engines)
 
 **Semantic search, cross-engine queries, write fan-out, and agent-to-agent discovery. Sits alongside your database, not instead of it.**
 
 CortexDB is an infrastructure layer for AI-native applications. It adds capabilities that no single database or ORM provides: a 5-tier read cascade with semantic caching, automatic write fan-out across multiple engines, agent-to-agent discovery via MCP/A2A protocols, and a unified query interface across relational, vector, graph, temporal, and streaming data.
 
-CortexDB is built **on top of** PostgreSQL, Redis, and Qdrant — not as a replacement for them. The TypeScript SDK connects directly to your databases for simple queries and routes through the CortexDB service only for operations that require cross-engine intelligence.
+CortexDB is built **on top of** best-of-breed engines (PostgreSQL, Redis, vector search, streams, and trace stores) — **not** as a replacement for them. The TypeScript SDK connects directly to your databases for simple queries and routes through the CortexDB service only for operations that require cross-engine intelligence.
+
+## CortexDB as a Logic Layer (Engine Abstraction)
+
+CortexDB is the *orchestration/logic layer*; the underlying engines are swappable. A typical deployment maps capabilities like this:
+
+- **Context / working memory** → **Redis**
+- **Stream / event bus** → **Redis Streams** today (Kafka/Redpanda-compatible contract)
+- **Vector search** → **Qdrant** today (pgvector supported as an alternative)
+- **Config / governance** → **PostgreSQL** (source of truth) + optional Redis cache
+- **Traces / observability** → **PostgreSQL/Supabase** today (ClickHouse-compatible contract)
+
+This architecture keeps your application code stable while letting CortexDB upgrade/replace the underlying engines as needs evolve (latency, scale, cost, or operational constraints).
 
 ---
 
@@ -286,9 +298,9 @@ cortexdb/
 
 | Document | Description |
 |----------|-------------|
-| [White Paper](docs/WHITEPAPER.md) | Technical architecture deep-dive |
+| [White Paper](docs/whitepaper.md) | Technical architecture deep-dive |
 | [Developer Guide](docs/DEVELOPER-GUIDE.md) | API reference and integration guide |
-| [Docker Guide](docs/DOCKER-GUIDE.md) | Deployment and operations |
+| [Docker Guide](docs/docker-guide.md) | Deployment and operations |
 | [PhD Evaluation](docs/PHD-EVALUATION.md) | Expert panel evaluation and enhancement roadmap |
 | [Contributing](CONTRIBUTING.md) | Development setup and guidelines |
 
