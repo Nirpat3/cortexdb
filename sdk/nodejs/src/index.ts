@@ -278,6 +278,88 @@ export class CortexDBClient {
   async deepHealth(): Promise<HealthResponse> {
     return (await this._fetch("/health/deep")) as HealthResponse;
   }
+
+  // -- Runtime / Workflows -------------------------------------------------
+
+  /**
+   * Start a workflow run.
+   *
+   * @param req - WorkflowStartRequest body (tenant_id, workflow_type, input, etc.)
+   */
+  async workflowStart(req: {
+    tenant_id: string;
+    merchant_id?: string;
+    workflow_type: string;
+    input?: Record<string, unknown>;
+    idempotency_key?: string;
+    tags?: Record<string, string>;
+  }): Promise<Record<string, unknown>> {
+    return this._fetch("/workflows/start", {
+      method: "POST",
+      body: JSON.stringify(req),
+    });
+  }
+
+  /**
+   * Send a signal to a running workflow.
+   */
+  async workflowSignal(req: {
+    tenant_id: string;
+    merchant_id?: string;
+    workflow_id: string;
+    signal_name: string;
+    payload?: Record<string, unknown>;
+  }): Promise<Record<string, unknown>> {
+    return this._fetch("/workflows/signal", {
+      method: "POST",
+      body: JSON.stringify(req),
+    });
+  }
+
+  /**
+   * Get workflow / run status by ID.
+   */
+  async workflowStatus(workflowId: string): Promise<Record<string, unknown>> {
+    return this._fetch(`/workflows/${workflowId}`);
+  }
+
+  /**
+   * Start a runtime run (alias for workflow start with simplified interface).
+   */
+  async runtimeRun(req: {
+    tenant_id: string;
+    merchant_id?: string;
+    run_type: string;
+    input?: Record<string, unknown>;
+    tags?: Record<string, string>;
+  }): Promise<Record<string, unknown>> {
+    return this._fetch("/runtime/run", {
+      method: "POST",
+      body: JSON.stringify(req),
+    });
+  }
+
+  /**
+   * Get runtime run status by ID.
+   */
+  async runtimeGet(runId: string): Promise<Record<string, unknown>> {
+    return this._fetch(`/runtime/${runId}`);
+  }
+
+  /**
+   * Cancel a runtime run.
+   */
+  async runtimeCancel(req: {
+    tenant_id: string;
+    merchant_id?: string;
+    run_id: string;
+    reason?: string;
+  }): Promise<Record<string, unknown>> {
+    return this._fetch("/runtime/cancel", {
+      method: "POST",
+      body: JSON.stringify(req),
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
