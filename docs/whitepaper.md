@@ -1,6 +1,6 @@
 # CortexEngine (CortexDB)™ Technical White Paper
 
-**Version 6.1.0 — March 2026**
+**Version 6.2.0 — March 2026**
 **Nirlab Inc.**
 
 ---

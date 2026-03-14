@@ -1,5 +1,33 @@
 # CortexDB Changelog
 
+## [6.2.0] - 2026-03-14
+
+**CortexEngine Positioning + Ops Learning Loop v1 + RuntimeCore v1**
+
+Type: Minor
+Previous: 6.1.0
+
+### Runtime (NEW)
+- RuntimeCore v1: `/runtime/*` + `/workflows/*` endpoints with tenant enforcement
+- Postgres persistence for runtime runs + RLS policies
+- Transactional outbox-style event emission for runtime lifecycle
+- Node/TypeScript SDK additions: workflowStart/workflowSignal/workflowStatus + runtimeRun/runtimeGet/runtimeCancel
+
+### Ops Learning Loop (NEW)
+- Config store contract: Redis Hash `system:config` + Postgres snapshots + safe-range validation
+- Signals emitter to Redis Streams (with fallback client)
+- Meta-agent + healer skeletons (rule-based tuning + rollback stubs)
+- MCP/REST endpoint specs for ops config + signal emission
+
+### Docs / Positioning
+- README + Whitepaper updated: CortexDB positioned as **CortexEngine** (logic layer over best-of-breed engines)
+- Engine abstraction mapping clarified (context/stream/vector/config/traces)
+
+### Maintenance
+- Removed duplicate case-variant doc files that collide on macOS case-insensitive filesystems
+
+---
+
 ## [6.1.0] - 2026-03-10
 
 **PhD Expert Panel Evaluation + P0/P1/P2 Enhancements**
