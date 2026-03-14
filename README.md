@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/version-6.1.0-blue" alt="Version">
+  <img src="https://img.shields.io/badge/version-6.2.0-blue" alt="Version">
   <img src="https://img.shields.io/badge/license-Proprietary-red" alt="License">
   <img src="https://img.shields.io/badge/PostgreSQL-16-336791" alt="PostgreSQL">
   <img src="https://img.shields.io/badge/Python-3.11+-3776AB" alt="Python">
