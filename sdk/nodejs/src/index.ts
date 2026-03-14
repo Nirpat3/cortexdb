@@ -360,6 +360,87 @@ export class CortexDBClient {
       body: JSON.stringify(req),
     });
   }
+
+  // -- Traces --------------------------------------------------------------
+
+  /**
+   * Create a new trace.
+   */
+  async traceWrite(req: {
+    tenant_id: string;
+    merchant_id?: string;
+    name: string;
+    task_id?: string;
+    request_id?: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<Record<string, unknown>> {
+    return this._fetch("/v1/traces/write", {
+      method: "POST",
+      body: JSON.stringify(req),
+    });
+  }
+
+  /**
+   * Append a step to an existing trace.
+   */
+  async traceAppendStep(req: {
+    tenant_id: string;
+    merchant_id?: string;
+    trace_id: string;
+    name: string;
+    status?: "ok" | "error" | "warning";
+    input?: Record<string, unknown>;
+    output?: Record<string, unknown>;
+    error?: string;
+    duration_ms?: number;
+    metadata?: Record<string, unknown>;
+  }): Promise<Record<string, unknown>> {
+    return this._fetch("/v1/traces/append-step", {
+      method: "POST",
+      body: JSON.stringify(req),
+    });
+  }
+
+  /**
+   * Close a trace.
+   */
+  async traceClose(req: {
+    tenant_id: string;
+    merchant_id?: string;
+    trace_id: string;
+    status?: "closed" | "error";
+    metadata?: Record<string, unknown>;
+  }): Promise<Record<string, unknown>> {
+    return this._fetch("/v1/traces/close", {
+      method: "POST",
+      body: JSON.stringify(req),
+    });
+  }
+
+  /**
+   * Get a trace by ID with all its steps.
+   */
+  async traceGet(traceId: string): Promise<Record<string, unknown>> {
+    return this._fetch(`/v1/traces/${traceId}`);
+  }
+
+  /**
+   * List traces for the current tenant.
+   */
+  async traceList(params?: {
+    task_id?: string;
+    status?: string;
+    limit?: number;
+  }): Promise<Record<string, unknown>> {
+    const qs = params
+      ? "?" + new URLSearchParams(
+          Object.entries(params)
+            .filter(([, v]) => v !== undefined)
+            .map(([k, v]) => [k, String(v)])
+        ).toString()
+      : "";
+    return this._fetch(`/v1/traces${qs}`);
+  }
 }
 
 // ---------------------------------------------------------------------------

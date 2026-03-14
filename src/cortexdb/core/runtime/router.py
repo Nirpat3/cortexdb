@@ -47,12 +47,20 @@ _store: Optional[RuntimeStore] = None
 
 
 def mount_runtime_routes(app, pool) -> None:
-    """Call once during lifespan startup to wire the store and include routers."""
+    """Call once during lifespan startup to wire the store and include routers.
+
+    Mounts at both bare paths (/workflows/*, /runtime/*) for backward
+    compatibility AND under /v1 prefix (/v1/workflows/*, /v1/runtime/*).
+    """
     global _store
     _store = RuntimeStore(pool=pool)
+    # Backward-compatible (bare) paths
     app.include_router(workflows_router)
     app.include_router(runtime_router)
-    logger.info("Runtime routes mounted (workflows + runtime)")
+    # Versioned /v1 paths
+    app.include_router(workflows_router, prefix="/v1")
+    app.include_router(runtime_router, prefix="/v1")
+    logger.info("Runtime routes mounted (workflows + runtime, bare + /v1)")
 
 
 def _get_store() -> RuntimeStore:

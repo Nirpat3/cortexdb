@@ -17,10 +17,23 @@ from cortexdb.core.runtime.schemas import (
     RunStatus,
 )
 from cortexdb.core.runtime.router import runtime_router, workflows_router
+from cortexdb.core.runtime.trace_router import traces_router
+from cortexdb.core.runtime.schemas import (
+    TraceStatus,
+    StepStatus,
+    TraceWriteRequest,
+    TraceWriteResponse,
+    TraceAppendStepRequest,
+    TraceAppendStepResponse,
+    TraceCloseRequest,
+    TraceCloseResponse,
+    TraceDetailResponse,
+)
 
 __all__ = [
     "runtime_router",
     "workflows_router",
+    "traces_router",
     "WorkflowStartRequest",
     "WorkflowStartResponse",
     "WorkflowSignalRequest",
@@ -31,4 +44,13 @@ __all__ = [
     "RuntimeCancelRequest",
     "RuntimeCancelResponse",
     "RunStatus",
+    "TraceStatus",
+    "StepStatus",
+    "TraceWriteRequest",
+    "TraceWriteResponse",
+    "TraceAppendStepRequest",
+    "TraceAppendStepResponse",
+    "TraceCloseRequest",
+    "TraceCloseResponse",
+    "TraceDetailResponse",
 ]
