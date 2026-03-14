@@ -224,6 +224,14 @@ async def lifespan(app: FastAPI):
         if db.write_fanout:
             db.write_fanout._outbox_pool = rel_engine.pool
         logger.info("OutboxWorker started with supervisor")
+        # Mount Runtime & Workflow routes (bare + /v1 prefixed)
+        from cortexdb.core.runtime.router import mount_runtime_routes
+        mount_runtime_routes(app, pool=rel_engine.pool)
+
+        # Mount Trace routes (/v1/traces/* + bare /traces/*)
+        from cortexdb.core.runtime.trace_router import mount_trace_routes
+        mount_trace_routes(app, pool=rel_engine.pool)
+
     else:
         logger.warning("OutboxWorker skipped — no relational engine pool available")
 
